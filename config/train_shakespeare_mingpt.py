@@ -37,8 +37,8 @@ warmup_iters = 100 # not super necessary potentially
 # compile = False # do not torch compile the model
 
 # on Hypatia
-device = 'cuda'  # run on cpu only
-compile = False # do not torch compile the model
+# device = 'cuda'  # run on cpu only
+# compile = False # do not torch compile the model
 
 # on desktop
 device = 'cpu'  # run on cpu only
