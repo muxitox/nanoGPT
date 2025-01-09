@@ -195,7 +195,6 @@ class GPT(nn.Module):
 
             if self.compute_statistics == True:
                 means = torch.matmul(x[:, [-1], :], self.lm_head.weight.T) / x[:, [-1], :].shape[2]
-
                 avgs = torch.mean(x[:, [-1], :]) * torch.mean(self.lm_head.weight.T, dim=0) / x[:, [-1], :].shape[2]
 
         return logits, loss
