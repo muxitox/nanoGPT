@@ -118,11 +118,13 @@ class GPTConfig:
 
 class GPT(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config, compute_statistics=False):
         super().__init__()
         assert config.vocab_size is not None
         assert config.block_size is not None
         self.config = config
+        # Compute statistics to probe MF approximation:
+        self.compute_statistics = compute_statistics
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
@@ -190,6 +192,11 @@ class GPT(nn.Module):
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
             loss = None
+
+            if self.compute_statistics == True:
+                means = torch.matmul(x[:, [-1], :], self.lm_head.weight.T) / x[:, [-1], :].shape[2]
+
+                avgs = torch.mean(x[:, [-1], :]) * torch.mean(self.lm_head.weight.T, dim=0) / x[:, [-1], :].shape[2]
 
         return logits, loss
 
