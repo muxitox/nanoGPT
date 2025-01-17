@@ -17,7 +17,7 @@ max_new_tokens = 500 # number of tokens generated in each sample
 temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
 top_k = 200 # retain only the top_k most likely tokens, clamp others to have 0 probability
 seed = 1337
-device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
+device = 'cpu' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float32' # 'float32' or 'bfloat16' or 'float16'
 compile = False # use PyTorch 2.0 to compile the model to be faster
 exec(open('configurator.py').read()) # overrides from command line or config file
@@ -37,7 +37,7 @@ if init_from == 'resume':
     ckpt_path = os.path.join(out_dir, 'ckpt.pt')
     checkpoint = torch.load(ckpt_path, map_location=device)
     gptconf = GPTConfig(**checkpoint['model_args'])
-    model = GPT(gptconf)
+    model = GPT(gptconf, compute_statistics=True)
     state_dict = checkpoint['model']
     unwanted_prefix = '_orig_mod.'
     for k,v in list(state_dict.items()):
@@ -80,10 +80,34 @@ if start.startswith('FILE:'):
 start_ids = encode(start)
 x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
 
+x_tensor = torch.zeros((num_samples, max_new_tokens, gptconf.n_embd))
 # run generation
 with torch.no_grad():
     with ctx:
         for k in range(num_samples):
-            y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
+            y, x_array = model.generate_comp_stats(x, max_new_tokens, temperature=temperature, top_k=top_k)
+            x_tensor[k] = x_array
+
+            print("Sample len", len(y[0].tolist()))
+            print('---------------')
             print(decode(y[0].tolist()))
             print('---------------')
+
+
+# Compute first mean and variances of x
+x_mean = torch.mean(x_tensor, dim=0)
+x_var = torch.mean(x_tensor**2, dim=0)
+
+feature_mean = torch.matmul(x_mean, model.lm_head.weight.T) / gptconf.n_embd
+
+t = 100
+cov_t= torch.zeros((gptconf.vocab_size, gptconf.vocab_size))
+for a in range(0, gptconf.vocab_size):
+    for b in range(0, gptconf.vocab_size):
+        for i in range(gptconf.n_embd):
+            cov_t[a, b] += model.lm_head.weight[i,a] * model.lm_head.weight[i,b] * (x_mean[t,i]**2 - x_var[t,i])
+
+cov_t /= gptconf.n_embd**2
+
+
+print()

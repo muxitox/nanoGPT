@@ -125,6 +125,7 @@ class GPT(nn.Module):
         self.config = config
         # Compute statistics to probe MF approximation:
         self.compute_statistics = compute_statistics
+        self.last_x = torch.zeros(self.config.n_embd)
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
@@ -194,8 +195,9 @@ class GPT(nn.Module):
             loss = None
 
             if self.compute_statistics == True:
-                means = torch.matmul(x[:, [-1], :], self.lm_head.weight.T) / x[:, [-1], :].shape[2]
-                avgs = torch.mean(x[:, [-1], :]) * torch.mean(self.lm_head.weight.T, dim=0) / x[:, [-1], :].shape[2]
+                # means = torch.matmul(x[:, [-1], :], self.lm_head.weight.T) / x[:, [-1], :].shape[2]
+                # avgs = torch.mean(x[:, [-1], :]) * torch.mean(self.lm_head.weight.T, dim=0) / x[:, [-1], :].shape[2]
+                self.last_x = x[:, [-1], :]
 
         return logits, loss
 
@@ -335,3 +337,34 @@ class GPT(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1)
 
         return idx
+
+    @torch.no_grad()
+    def generate_comp_stats(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+        """
+        Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
+        the sequence max_new_tokens times, feeding the predictions back into the model each time.
+        Most likely you'll want to make sure to be in model.eval() mode of operation for this.
+        """
+        x_matrix = torch.zeros(max_new_tokens, self.config.n_embd)
+        for t in range(max_new_tokens):
+            # if the sequence context is growing too long we must crop it at block_size
+            idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+            # forward the model to get the logits for the index in the sequence
+            logits, _ = self(idx_cond)
+
+            x_matrix[t, :] = torch.clone(self.last_x)
+
+            # pluck the logits at the final step and scale by desired temperature
+            logits = logits[:, -1, :] / temperature
+            # optionally crop the logits to only the top k options
+            if top_k is not None:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = -float('Inf')
+            # apply softmax to convert logits to (normalized) probabilities
+            probs = F.softmax(logits, dim=-1)
+            # sample from the distribution
+            idx_next = torch.multinomial(probs, num_samples=1)
+            # append sampled index to the running sequence and continue
+            idx = torch.cat((idx, idx_next), dim=1)
+
+        return idx, x_matrix
