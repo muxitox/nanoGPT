@@ -12,8 +12,8 @@ from model import GPTConfig, GPT
 init_from = 'resume' # either 'resume' (from an out_dir) or a gpt2 variant (e.g. 'gpt2-xl')
 out_dir = 'out-shakespeare-gpu' # ignored if init_from is not 'resume'
 start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
-num_samples = 5 # number of samples to draw
-max_new_tokens = 500 # number of tokens generated in each sample
+num_samples = 50 # number of samples to draw
+max_new_tokens = 150 # number of tokens generated in each sample
 temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
 top_k = 200 # retain only the top_k most likely tokens, clamp others to have 0 probability
 seed = 1337
@@ -94,20 +94,25 @@ with torch.no_grad():
             print('---------------')
 
 
-# Compute first mean and variances of x
-x_mean = torch.mean(x_tensor, dim=0)
-x_var = torch.mean(x_tensor**2, dim=0)
+    # Compute first mean and variances of x
+    # Do this in torch.no_grad or memory requirements will scale
+    x_mean = torch.mean(x_tensor, dim=0)
+    x_sq_mean = torch.mean(x_tensor**2, dim=0)
+    x_var = x_mean**2 - x_sq_mean
 
-feature_mean = torch.matmul(x_mean, model.lm_head.weight.T) / gptconf.n_embd
+    feat_mean = torch.matmul(x_mean, model.lm_head.weight.T) / gptconf.n_embd
 
-t = 100
-cov_t= torch.zeros((gptconf.vocab_size, gptconf.vocab_size))
-for a in range(0, gptconf.vocab_size):
-    for b in range(0, gptconf.vocab_size):
-        for i in range(gptconf.n_embd):
-            cov_t[a, b] += model.lm_head.weight[i,a] * model.lm_head.weight[i,b] * (x_mean[t,i]**2 - x_var[t,i])
+    num_trials = 100
+    for r in range(num_trials):
+        # Compute covariances for features a and b
+        a, b = torch.randint(gptconf.vocab_size, (2,))
 
-cov_t /= gptconf.n_embd**2
+        feat_cov_t_ab = torch.einsum('i,i,ti->t', model.lm_head.weight[a], model.lm_head.weight[b], x_var) / gptconf.n_embd ** 2
+
+        print("Check covariances for features:", a, b)
+        print(feat_cov_t_ab)
 
 
-print()
+    print(feat_mean)
+    import pdb; pdb.set_trace()
+    print()
