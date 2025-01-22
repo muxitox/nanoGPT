@@ -118,11 +118,14 @@ class GPTConfig:
 
 class GPT(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config, compute_statistics=False):
         super().__init__()
         assert config.vocab_size is not None
         assert config.block_size is not None
         self.config = config
+        # Compute statistics to probe MF approximation:
+        self.compute_statistics = compute_statistics
+        self.last_x = torch.zeros(self.config.n_embd)
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
@@ -190,6 +193,11 @@ class GPT(nn.Module):
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
             loss = None
+
+            if self.compute_statistics == True:
+                # means = torch.matmul(x[:, [-1], :], self.lm_head.weight.T) / x[:, [-1], :].shape[2]
+                # avgs = torch.mean(x[:, [-1], :]) * torch.mean(self.lm_head.weight.T, dim=0) / x[:, [-1], :].shape[2]
+                self.last_x = x[:, [-1], :]
 
         return logits, loss
 
@@ -343,6 +351,8 @@ class GPT(nn.Module):
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
             # forward the model to get the logits for the index in the sequence
             logits, _ = self(idx_cond)
+
+            x_matrix[t, :] = torch.clone(self.last_x)
 
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
