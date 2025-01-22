@@ -6,14 +6,18 @@ import pickle
 from contextlib import nullcontext
 import torch
 import tiktoken
-from model import GPTConfig, GPT
+from model_tests import GPTConfig, GPT
+import matplotlib.pyplot as plt
 
 # -----------------------------------------------------------------------------
 init_from = 'resume' # either 'resume' (from an out_dir) or a gpt2 variant (e.g. 'gpt2-xl')
 out_dir = 'out-shakespeare-gpu' # ignored if init_from is not 'resume'
 start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
-num_samples = 50 # number of samples to draw
-max_new_tokens = 150 # number of tokens generated in each sample
+# start = "\nMy lord, cheerfully made" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
+# start = "\nWARWICK:\nWhat, wilt thou, wilt thou not, for thy head?\nQUEEN MARGARET:\nHow now, madam?"
+# start = "FILE:text_sample/sample_long.txt"
+num_samples = 5 # number of samples to draw
+max_new_tokens = 10 # number of tokens generated in each sample
 temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
 top_k = 200 # retain only the top_k most likely tokens, clamp others to have 0 probability
 seed = 1337
@@ -94,6 +98,12 @@ with torch.no_grad():
             print('---------------')
 
 
+    # Re-compute mean projection
+    layer_i = 0
+    Wq, Wk, Wv = model.transformer.h[layer_i].attn.c_attn.weight.split(gptconf.n_embd)
+
+    original_m = torch.matmul(x_array, model.lm_head.weight.T) / gptconf.n_embd
+
     # Compute first mean and variances of x
     # Do this in torch.no_grad or memory requirements will scale
     x_mean = torch.mean(x_tensor, dim=0)
@@ -102,17 +112,31 @@ with torch.no_grad():
 
     feat_mean = torch.matmul(x_mean, model.lm_head.weight.T) / gptconf.n_embd
 
-    num_trials = 100
-    for r in range(num_trials):
+    num_cov_samples = 5000
+    feat_cov_t_ab_tensor = torch.zeros((num_cov_samples, max_new_tokens))
+    for r in range(num_cov_samples):
         # Compute covariances for features a and b
         a, b = torch.randint(gptconf.vocab_size, (2,))
 
-        feat_cov_t_ab = torch.einsum('i,i,ti->t', model.lm_head.weight[a], model.lm_head.weight[b], x_var) / gptconf.n_embd ** 2
-
-        print("Check covariances for features:", a, b)
-        print(feat_cov_t_ab)
+        feat_cov_t_ab_tensor[r] = torch.einsum('i,i,ti->t', model.lm_head.weight[a], model.lm_head.weight[b], x_var) / gptconf.n_embd ** 2
 
 
-    print(feat_mean)
+
+    d_list = [0]
+    for d in d_list:
+        fig, ax = plt.subplots(1, 3)
+        print("Check step", d)
+        ax[0].hist(original_m[d], bins=100)
+        ax[0].set_title(rf"original $m^{{out}}_{{a,t={d}}}$")
+        ax[1].hist(feat_mean[d], bins=100)
+        ax[1].set_title(rf"$m^{{out}}_{{a,t={d}}}$")
+        ax[2].hist(feat_cov_t_ab_tensor[:, d], bins=100)
+        ax[2].set_title(rf"sample $\Sigma^{{out}}_{{a,b,t={d}}}$")
+        fig.suptitle("t = " + str(d))
+        print(feat_mean)
+        print()
+
+        fig.show()
+        plt.close(fig)
     import pdb; pdb.set_trace()
-    print()
+

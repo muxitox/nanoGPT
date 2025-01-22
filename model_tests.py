@@ -28,7 +28,7 @@ class LayerNorm(nn.Module):
 
 class CausalSelfAttention(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config, compute_statistics=False):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         # key, query, value projections for all heads, but in a batch
@@ -50,8 +50,15 @@ class CausalSelfAttention(nn.Module):
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                         .view(1, 1, config.block_size, config.block_size))
 
+        # ANGEL: Edit to flag whether we want to save variables at any point
+        self.compute_statistics = compute_statistics
+        self.current_x = torch.zeros(self.n_embd)
+
     def forward(self, x):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
+
+        if self.compute_statistics:
+            self.current_x = x[:, [-1], :]
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
         q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
@@ -94,10 +101,10 @@ class MLP(nn.Module):
 
 class Block(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config, compute_statistics=False):
         super().__init__()
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
-        self.attn = CausalSelfAttention(config)
+        self.attn = CausalSelfAttention(config, compute_statistics)
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
@@ -125,13 +132,12 @@ class GPT(nn.Module):
         self.config = config
         # Compute statistics to probe MF approximation:
         self.compute_statistics = compute_statistics
-        self.last_x = torch.zeros(self.config.n_embd)
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
             drop = nn.Dropout(config.dropout),
-            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            h = nn.ModuleList([Block(config, self.compute_statistics) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -193,11 +199,6 @@ class GPT(nn.Module):
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
             loss = None
-
-            if self.compute_statistics == True:
-                # means = torch.matmul(x[:, [-1], :], self.lm_head.weight.T) / x[:, [-1], :].shape[2]
-                # avgs = torch.mean(x[:, [-1], :]) * torch.mean(self.lm_head.weight.T, dim=0) / x[:, [-1], :].shape[2]
-                self.last_x = x[:, [-1], :]
 
         return logits, loss
 
@@ -352,7 +353,8 @@ class GPT(nn.Module):
             # forward the model to get the logits for the index in the sequence
             logits, _ = self(idx_cond)
 
-            x_matrix[t, :] = torch.clone(self.last_x)
+            layer_i = 0
+            x_matrix[t, :] = torch.clone(self.transformer.h[layer_i].attn.current_x)
 
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
