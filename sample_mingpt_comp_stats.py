@@ -16,8 +16,8 @@ start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE
 # start = "\nMy lord, cheerfully made" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
 # start = "\nWARWICK:\nWhat, wilt thou, wilt thou not, for thy head?\nQUEEN MARGARET:\nHow now, madam?"
 # start = "FILE:text_sample/sample_long.txt"
-num_samples = 5 # number of samples to draw
-max_new_tokens = 10 # number of tokens generated in each sample
+num_samples = 1500 # number of samples to draw
+max_new_tokens = 2 # number of tokens generated in each sample
 temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
 top_k = 200 # retain only the top_k most likely tokens, clamp others to have 0 probability
 seed = 1337
@@ -85,58 +85,127 @@ start_ids = encode(start)
 x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
 
 x_tensor = torch.zeros((num_samples, max_new_tokens, gptconf.n_embd))
+q_tensor = torch.zeros((num_samples, max_new_tokens, gptconf.n_head, gptconf.n_embd // gptconf.n_head))
+
 # run generation
 with torch.no_grad():
     with ctx:
         for k in range(num_samples):
-            y, x_array = model.generate_comp_stats(x, max_new_tokens, temperature=temperature, top_k=top_k)
+            y, x_array, q_matrix = model.generate_comp_stats(x, max_new_tokens, temperature=temperature, top_k=top_k)
             x_tensor[k] = x_array
+            q_tensor[k] = q_matrix
 
-            print("Sample len", len(y[0].tolist()))
-            print('---------------')
-            print(decode(y[0].tolist()))
-            print('---------------')
+
+            if k % 100 == 0:
+                print("Computing sample ", k)
+
+            plot_samples = False
+            if plot_samples:
+                print("Sample len", len(y[0].tolist()))
+                print('---------------')
+                print(decode(y[0].tolist()))
+                print('---------------')
 
 
     # Re-compute mean projection
     layer_i = 0
+    # Get separate weights
     Wq, Wk, Wv = model.transformer.h[layer_i].attn.c_attn.weight.split(gptconf.n_embd)
 
-    original_m = torch.matmul(x_array, model.lm_head.weight.T) / gptconf.n_embd
-
-    # Compute first mean and variances of x
-    # Do this in torch.no_grad or memory requirements will scale
-    x_mean = torch.mean(x_tensor, dim=0)
-    x_sq_mean = torch.mean(x_tensor**2, dim=0)
-    x_var = x_mean**2 - x_sq_mean
-
-    feat_mean = torch.matmul(x_mean, model.lm_head.weight.T) / gptconf.n_embd
-
-    num_cov_samples = 5000
-    feat_cov_t_ab_tensor = torch.zeros((num_cov_samples, max_new_tokens))
-    for r in range(num_cov_samples):
-        # Compute covariances for features a and b
-        a, b = torch.randint(gptconf.vocab_size, (2,))
-
-        feat_cov_t_ab_tensor[r] = torch.einsum('i,i,ti->t', model.lm_head.weight[a], model.lm_head.weight[b], x_var) / gptconf.n_embd ** 2
+    # Divide weight in n_head heads
+    Wq_h = Wq.view(gptconf.n_head, gptconf.n_embd // gptconf.n_head, gptconf.n_embd)
+    Wk_h = Wk.view(gptconf.n_head, gptconf.n_embd // gptconf.n_head, gptconf.n_embd)
+    Wv_h = Wv.view(gptconf.n_head, gptconf.n_embd // gptconf.n_head, gptconf.n_embd)
 
 
+    # To get the projection for all the heads with some x:
+    mq_h = torch.matmul( Wq_h, x_tensor[0, -1])
 
-    d_list = [0]
-    for d in d_list:
-        fig, ax = plt.subplots(1, 3)
-        print("Check step", d)
-        ax[0].hist(original_m[d], bins=100)
-        ax[0].set_title(rf"original $m^{{out}}_{{a,t={d}}}$")
-        ax[1].hist(feat_mean[d], bins=100)
-        ax[1].set_title(rf"$m^{{out}}_{{a,t={d}}}$")
-        ax[2].hist(feat_cov_t_ab_tensor[:, d], bins=100)
-        ax[2].set_title(rf"sample $\Sigma^{{out}}_{{a,b,t={d}}}$")
-        fig.suptitle("t = " + str(d))
-        print(feat_mean)
-        print()
 
-        fig.show()
-        plt.close(fig)
-    import pdb; pdb.set_trace()
+    fig, ax = plt.subplots(3, 3)
+    ax_ravel = ax.ravel()
+    print("Plot q")
+    for i in range(0, 3):
+        # Examine feat feat_a from head h_i for different samples
+        h_i = torch.randint(gptconf.n_head, (1,))[0]
+        feat_a = torch.randint(gptconf.n_embd // gptconf.n_head, (1,))[0]
+        print(h_i, feat_a)
 
+        mq_h_i_a = torch.matmul(Wq_h[h_i, feat_a], x_tensor[:, -1].T)
+        print("Unique", len(torch.unique(mq_h_i_a)))
+        ax_ravel[i].hist(mq_h_i_a, bins=50)
+        ax_ravel[i].axvline(mq_h_i_a.mean())
+        ax_ravel[i].set_title(f"m^q_{{{h_i},{feat_a}}}")
+
+
+    print("Plot k")
+    for i in range(3, 6):
+        # Examine feat feat_a from head h_i for different samples
+        h_i = torch.randint(gptconf.n_head, (1,))[0]
+        feat_a = torch.randint(gptconf.n_embd // gptconf.n_head, (1,))[0]
+        print(h_i, feat_a)
+
+        mk_h_i_a = torch.matmul(Wk_h[h_i, feat_a], x_tensor[:, -1].T)
+        print("Unique", len(torch.unique(mk_h_i_a)))
+        ax_ravel[i].hist(mk_h_i_a, bins=50)
+        ax_ravel[i].axvline(mk_h_i_a.mean())
+        ax_ravel[i].set_title(f"m^k_{{{h_i},{feat_a}}}")
+
+
+    print("Plot v")
+    for i in range(6 , 9):
+        # Examine feat feat_a from head h_i for different samples
+        h_i = torch.randint(gptconf.n_head, (1,))[0]
+        feat_a = torch.randint(gptconf.n_embd // gptconf.n_head, (1,))[0]
+        print(h_i, feat_a)
+
+        mv_h_i_a = torch.matmul(Wv_h[h_i, feat_a], x_tensor[:, -1].T)
+        print("Unique", len(torch.unique(mv_h_i_a)))
+        ax_ravel[i].hist(mv_h_i_a, bins=50)
+        ax_ravel[i].axvline(mv_h_i_a.mean())
+        ax_ravel[i].set_title(f"m^v_{{{h_i},{feat_a}}}")
+
+
+    fig.show()
+    plt.close(fig)
+
+    # print(torch.allclose(mq_h, q_tensor[0, -1, :]))
+
+    print()
+
+    # # Compute first mean and variances of x
+    # # Do this in torch.no_grad or memory requirements will scale
+    # x_mean = torch.mean(x_tensor, dim=0)
+    # x_sq_mean = torch.mean(x_tensor**2, dim=0)
+    # x_var = x_mean**2 - x_sq_mean
+    #
+    # feat_mean = torch.matmul(x_mean, model.lm_head.weight.T) / gptconf.n_embd
+    #
+    # num_cov_samples = 5000
+    # feat_cov_t_ab_tensor = torch.zeros((num_cov_samples, max_new_tokens))
+    # for r in range(num_cov_samples):
+    #     # Compute covariances for features a and b
+    #     a, b = torch.randint(gptconf.vocab_size, (2,))
+    #
+    #     feat_cov_t_ab_tensor[r] = torch.einsum('i,i,ti->t', model.lm_head.weight[a], model.lm_head.weight[b], x_var) / gptconf.n_embd ** 2
+    #
+    #
+    #
+    # d_list = [0]
+    # for d in d_list:
+    #     fig, ax = plt.subplots(1, 3)
+    #     print("Check step", d)
+    #     ax[0].hist(original_m[d], bins=100)
+    #     ax[0].set_title(rf"original $m^{{out}}_{{a,t={d}}}$")
+    #     ax[1].hist(feat_mean[d], bins=100)
+    #     ax[1].set_title(rf"$m^{{out}}_{{a,t={d}}}$")
+    #     ax[2].hist(feat_cov_t_ab_tensor[:, d], bins=100)
+    #     ax[2].set_title(rf"sample $\Sigma^{{out}}_{{a,b,t={d}}}$")
+    #     fig.suptitle("t = " + str(d))
+    #     print(feat_mean)
+    #     print()
+    #
+    #     fig.show()
+    #     plt.close(fig)
+    # import pdb; pdb.set_trace()
+    #
