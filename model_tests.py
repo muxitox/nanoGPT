@@ -57,14 +57,25 @@ class CausalSelfAttention(nn.Module):
     def forward(self, x):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
-        if self.compute_statistics:
-            self.current_x = x[:, [-1], :]
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
         q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+
+        if self.compute_statistics:
+            self.current_x = x[:, [-1], :]
+            self.current_q = q[:, :, [-1], :]
+
+            # Wq, Wk, Wv = self.c_attn.weight.split(self.n_embd)
+            #
+            # mq2 = torch.matmul( Wq, x[0, -1, :])
+            # mq2_h = mq2.view(self.n_head, self.n_embd // self.n_head)
+            #
+            # test_q = q[:,:,-1,:]
+            # print(torch.allclose(test_q[0], mq2_h))
+            # print()
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
@@ -347,6 +358,11 @@ class GPT(nn.Module):
         Most likely you'll want to make sure to be in model.eval() mode of operation for this.
         """
         x_matrix = torch.zeros(max_new_tokens, self.config.n_embd)
+        q_matrix = torch.zeros(max_new_tokens, self.config.n_head, self.config.n_embd // self.config.n_head)
+
+        self.compute_statistics = True
+        self.transformer.h[0].attn.compute_statistics = True
+
         for t in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it at block_size
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
@@ -355,6 +371,8 @@ class GPT(nn.Module):
 
             layer_i = 0
             x_matrix[t, :] = torch.clone(self.transformer.h[layer_i].attn.current_x)
+            q_matrix[t, :, :] = torch.clone(self.transformer.h[layer_i].attn.current_q[0, :, 0, :]) # Copy q to test if we are making the computations correctly
+
 
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
@@ -369,4 +387,4 @@ class GPT(nn.Module):
             # append sampled index to the running sequence and continue
             idx = torch.cat((idx, idx_next), dim=1)
 
-        return idx, x_matrix
+        return idx, x_matrix, q_matrix
