@@ -357,22 +357,19 @@ class GPT(nn.Module):
         the sequence max_new_tokens times, feeding the predictions back into the model each time.
         Most likely you'll want to make sure to be in model.eval() mode of operation for this.
         """
-        x_matrix = torch.zeros(max_new_tokens, self.config.n_embd)
-        q_matrix = torch.zeros(max_new_tokens, self.config.n_head, self.config.n_embd // self.config.n_head)
+        x_matrix = torch.zeros(max_new_tokens, self.config.n_embd, device=idx.device)
+        q_matrix = torch.zeros(max_new_tokens, self.config.n_head, self.config.n_embd // self.config.n_head, device=idx.device)
 
         self.compute_statistics = True
         self.transformer.h[0].attn.compute_statistics = True
 
-        logits_0 = torch.zeros(self.config.vocab_size)
+        logits_0 = torch.zeros(self.config.vocab_size, device=idx.device)
 
         for t in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it at block_size
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
             # forward the model to get the logits for the index in the sequence
             logits, _ = self(idx_cond)
-
-            if t==0: # Save logits of the first computed token
-                logits_0 = logits
 
             layer_i = 0
             x_matrix[t, :] = torch.clone(self.transformer.h[layer_i].attn.current_x)
@@ -381,6 +378,11 @@ class GPT(nn.Module):
 
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
+
+            # Save the logits for the first token computed
+            if t == 0:
+                logits_0 = logits
+
             # optionally crop the logits to only the top k options
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
