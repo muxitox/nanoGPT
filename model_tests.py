@@ -363,11 +363,16 @@ class GPT(nn.Module):
         self.compute_statistics = True
         self.transformer.h[0].attn.compute_statistics = True
 
+        logits_0 = torch.zeros(self.config.vocab_size)
+
         for t in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it at block_size
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
             # forward the model to get the logits for the index in the sequence
             logits, _ = self(idx_cond)
+
+            if t==0: # Save logits of the first computed token
+                logits_0 = logits
 
             layer_i = 0
             x_matrix[t, :] = torch.clone(self.transformer.h[layer_i].attn.current_x)
@@ -387,4 +392,4 @@ class GPT(nn.Module):
             # append sampled index to the running sequence and continue
             idx = torch.cat((idx, idx_next), dim=1)
 
-        return idx, x_matrix, q_matrix
+        return idx, x_matrix, q_matrix, logits_0
