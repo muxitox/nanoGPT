@@ -363,7 +363,7 @@ class GPT(nn.Module):
         self.compute_statistics = True
         self.transformer.h[0].attn.compute_statistics = True
 
-        probs_0 = torch.zeros(min(top_k, self.config.vocab_size), device=idx.device)
+        probs_0 = torch.zeros(self.config.vocab_size, device=idx.device)
 
         for t in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it at block_size
