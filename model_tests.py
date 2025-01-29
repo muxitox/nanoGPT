@@ -363,7 +363,7 @@ class GPT(nn.Module):
         self.compute_statistics = True
         self.transformer.h[0].attn.compute_statistics = True
 
-        logits_0 = torch.zeros(self.config.vocab_size, device=idx.device)
+        probs_0 = torch.zeros(min(top_k, self.config.vocab_size), device=idx.device)
 
         for t in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it at block_size
@@ -378,20 +378,19 @@ class GPT(nn.Module):
 
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
-
-            # Save the logits for the first token computed
-            if t == 0:
-                logits_0 = logits
-
             # optionally crop the logits to only the top k options
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = -float('Inf')
             # apply softmax to convert logits to (normalized) probabilities
             probs = F.softmax(logits, dim=-1)
+            # Save the probs for the first token computed
+            if t == 0:
+                probs_0 = probs
+
             # sample from the distribution
             idx_next = torch.multinomial(probs, num_samples=1)
             # append sampled index to the running sequence and continue
             idx = torch.cat((idx, idx_next), dim=1)
 
-        return idx, x_matrix, q_matrix, logits_0
+        return idx, x_matrix, q_matrix, probs_0
