@@ -67,6 +67,7 @@ class CausalSelfAttention(nn.Module):
         if self.compute_statistics:
             self.current_x = x[:, [-1], :]
             self.current_q = q[:, :, [-1], :]
+            self.x_history = x
 
             # Wq, Wk, Wv = self.c_attn.weight.split(self.n_embd)
             #
@@ -393,4 +394,4 @@ class GPT(nn.Module):
             # append sampled index to the running sequence and continue
             idx = torch.cat((idx, idx_next), dim=1)
 
-        return idx, x_matrix, q_matrix, probs_0
+        return idx, x_matrix, q_matrix, self.transformer.h[0].attn.x_history, probs_0
