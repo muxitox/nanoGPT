@@ -14,6 +14,8 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from torch.utils.hipify.hipify_python import compute_stats
+
 
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
@@ -28,7 +30,7 @@ class LayerNorm(nn.Module):
 
 class CausalSelfAttention(nn.Module):
 
-    def __init__(self, config, compute_statistics=False):
+    def __init__(self, config, save_statistics=False):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         # key, query, value projections for all heads, but in a batch
@@ -51,7 +53,7 @@ class CausalSelfAttention(nn.Module):
                                         .view(1, 1, config.block_size, config.block_size))
 
         # ANGEL: Edit to flag whether we want to save variables at any point
-        self.compute_statistics = compute_statistics
+        self.save_statistics = save_statistics
         self.current_x = torch.zeros(self.n_embd)
 
     def forward(self, x):
@@ -64,10 +66,12 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
 
-        if self.compute_statistics:
-            self.current_x = x[:, [-1], :]
-            self.current_q = q[:, :, [-1], :]
-            self.x_history = x
+        if self.save_statistics:
+
+            self.x = x
+            self.k = k
+            self.q = q
+            self.v = v
 
             # Wq, Wk, Wv = self.c_attn.weight.split(self.n_embd)
             #
@@ -89,6 +93,16 @@ class CausalSelfAttention(nn.Module):
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
             y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+
+            if self.save_statistics:
+
+                y_k_hat = att @ k
+                h = 0
+
+                # Retrieve batch 0 and last token repr, for head h
+                self.y_k_hat_h = y_k_hat[0, h, -1, :]
+                self.y_h = y[0, h, -1, :]
+
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
 
         # output projection
@@ -113,10 +127,10 @@ class MLP(nn.Module):
 
 class Block(nn.Module):
 
-    def __init__(self, config, compute_statistics=False):
+    def __init__(self, config):
         super().__init__()
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
-        self.attn = CausalSelfAttention(config, compute_statistics)
+        self.attn = CausalSelfAttention(config)
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
@@ -142,14 +156,12 @@ class GPT(nn.Module):
         assert config.vocab_size is not None
         assert config.block_size is not None
         self.config = config
-        # Compute statistics to probe MF approximation:
-        self.compute_statistics = compute_statistics
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
             drop = nn.Dropout(config.dropout),
-            h = nn.ModuleList([Block(config, self.compute_statistics) for _ in range(config.n_layer)]),
+            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -358,24 +370,29 @@ class GPT(nn.Module):
         the sequence max_new_tokens times, feeding the predictions back into the model each time.
         Most likely you'll want to make sure to be in model.eval() mode of operation for this.
         """
-        x_matrix = torch.zeros(max_new_tokens, self.config.n_embd, device=idx.device)
+        x_matrix_ini = torch.zeros(max_new_tokens, self.config.n_embd, device=idx.device)
+        x_matrix_end = torch.zeros(max_new_tokens, self.config.n_embd, device=idx.device)
         q_matrix = torch.zeros(max_new_tokens, self.config.n_head, self.config.n_embd // self.config.n_head, device=idx.device)
-
-        self.compute_statistics = True
-        self.transformer.h[0].attn.compute_statistics = True
 
         probs_0 = torch.zeros(self.config.vocab_size, device=idx.device)
 
         for t in range(max_new_tokens):
+
+            # If we are computing the last token, save pointers to the variables.
+            if t == max_new_tokens - 1:
+                self.transformer.h[0].attn.save_statistics = True
+                self.transformer.h[-1].attn.save_statistics = True
+
             # if the sequence context is growing too long we must crop it at block_size
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
             # forward the model to get the logits for the index in the sequence
             logits, _ = self(idx_cond)
 
+            # Save input to the attention blocks at the beginning and end blocks
             layer_i = 0
-            x_matrix[t, :] = torch.clone(self.transformer.h[layer_i].attn.current_x)
-            q_matrix[t, :, :] = torch.clone(self.transformer.h[layer_i].attn.current_q[0, :, 0, :]) # Copy q to test if we are making the computations correctly
-
+            x_matrix_ini[t, :] = torch.clone(self.transformer.h[layer_i].attn.current_x)
+            layer_i = -1
+            x_matrix_end[t, :] = torch.clone(self.transformer.h[layer_i].attn.current_x)
 
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
@@ -394,4 +411,4 @@ class GPT(nn.Module):
             # append sampled index to the running sequence and continue
             idx = torch.cat((idx, idx_next), dim=1)
 
-        return idx, x_matrix, q_matrix, self.transformer.h[0].attn.x_history, probs_0
+        return idx, probs_0

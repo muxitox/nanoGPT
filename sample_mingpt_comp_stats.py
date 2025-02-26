@@ -16,10 +16,10 @@ out_dir = 'out-shakespeare-gpu' # ignored if init_from is not 'resume'
 # start = "\nMy lord, cheerfully made" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
 # start = "\nWARWICK:\nWhat, wilt thou, wilt thou not, for thy head?\nQUEEN MARGARET:\nHow now, madam?"
 # start = "FILE:text_sample/sample_long.txt"
-start = "FILE:text_sample/sample_long_gpt2_2.txt"
+# start = "FILE:text_sample/sample_long_gpt2_2.txt"
 # start = "\nThe Lion King was conceived during conversations among various Disney executives, to whom several writers submitted early treatments. Original director George Scribner had envisioned"
-# start = "\nNeuroscience is the scientific study of the nervous system (the brain, spinal cord, and peripheral nervous system), its functions, and its disorders. It is a multidisciplinary science that combines"
-num_samples = 1000 # number of samples to draw
+start = "\nNeuroscience is the scientific study of the nervous system (the brain, spinal cord, and peripheral nervous system), its functions, and its disorders. It is a multidisciplinary science that combines"
+num_samples = 1 # number of samples to draw
 max_new_tokens = 2 # number of tokens generated in each sample
 temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
 top_k = 200 # retain only the top_k most likely tokens, clamp others to have 0 probability
@@ -87,17 +87,26 @@ if start.startswith('FILE:'):
 start_ids = encode(start)
 x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
 
-x_tensor = torch.zeros((num_samples, max_new_tokens, model.config.n_embd))
+x_tensor_ini = torch.zeros((num_samples, model.config.n_embd))
+x_tensor_end = torch.zeros((num_samples, model.config.n_embd))
 q_tensor = torch.zeros((num_samples, max_new_tokens, model.config.n_head, model.config.n_embd // model.config.n_head))
 
 # run generation
 with torch.no_grad():
     with ctx:
         for k in range(num_samples):
-            y, x_array, q_matrix = model.generate_comp_stats(x, max_new_tokens, temperature=temperature, top_k=top_k)
-            x_tensor[k] = x_array
-            q_tensor[k] = q_matrix
+            # y, x_array, q_matrix, x_history,  probs_0, y_k_hat_h, y_h = model.generate_comp_stats(x, max_new_tokens, temperature=temperature, top_k=top_k)
 
+            y, probs_0 = model.generate_comp_stats(x, max_new_tokens, temperature=temperature, top_k=top_k)
+
+
+            # Retrieve statistics from the first and last layers
+            layer_i = 0
+            x_history_ini = model.transformer.h[layer_i].attn.x  # Shapes B, T, C
+            x_tensor_ini[k] = x_history_ini[:, -1, :]  # To compute mfs, save just last sampled token
+            layer_i = -1
+            x_history_end = model.transformer.h[layer_i].attn.x
+            x_tensor_end[k] = x_history_end[:, -1, :]
 
             if k % 100 == 0:
                 print("Computing sample ", k)
@@ -110,105 +119,173 @@ with torch.no_grad():
                 print('---------------')
 
 
-    # Re-compute mean projection
-    layer_i = 0
-    # Get separate weights
-    Wq, Wk, Wv = model.transformer.h[layer_i].attn.c_attn.weight.split(model.config.n_embd)
+    for layer_i in [0, -1]:
 
-    # Divide weight in n_head heads
-    Wq_h = Wq.view(model.config.n_head, model.config.n_embd // model.config.n_head, model.config.n_embd)
-    Wk_h = Wk.view(model.config.n_head, model.config.n_embd // model.config.n_head, model.config.n_embd)
-    Wv_h = Wv.view(model.config.n_head, model.config.n_embd // model.config.n_head, model.config.n_embd)
+        if layer_i == 0:
+            x_tensor = x_tensor_ini
 
+        elif layer_i == -1:
+            x_tensor = x_tensor_end
 
-    # To get the projection for all the heads with some x:
-    mq_h = torch.matmul( Wq_h, x_tensor[0, -1])
+        else:
+            raise Exception("Not implemented")
 
+        # Get separate weights
+        Wq, Wk, Wv = model.transformer.h[layer_i].attn.c_attn.weight.split(model.config.n_embd)
 
-    fig, ax = plt.subplots(3, 3)
-    ax_ravel = ax.ravel()
-    print("Plot q")
-    for i in range(0, 3):
-        # Examine feat feat_a from head h_i for different samples
-        h_i = torch.randint(model.config.n_head, (1,))[0]
-        feat_a = torch.randint(model.config.n_embd // model.config.n_head, (1,))[0]
-        print(h_i, feat_a)
-
-        mq_h_i_a = torch.matmul(Wq_h[h_i, feat_a], x_tensor[:, -1].T)
-        print("Unique", len(torch.unique(mq_h_i_a)))
-        ax_ravel[i].hist(mq_h_i_a, bins=50)
-        ax_ravel[i].axvline(mq_h_i_a.mean(), color='k', linestyle='dashed')
-        ax_ravel[i].set_title(f"m^q_{{{h_i},{feat_a}}}")
+        # Divide weight in n_head heads
+        Wq_h = Wq.view(model.config.n_head, model.config.n_embd // model.config.n_head, model.config.n_embd)
+        Wk_h = Wk.view(model.config.n_head, model.config.n_embd // model.config.n_head, model.config.n_embd)
+        Wv_h = Wv.view(model.config.n_head, model.config.n_embd // model.config.n_head, model.config.n_embd)
 
 
-    print("Plot k")
-    for i in range(3, 6):
-        # Examine feat feat_a from head h_i for different samples
-        h_i = torch.randint(model.config.n_head, (1,))[0]
-        feat_a = torch.randint(model.config.n_embd // model.config.n_head, (1,))[0]
-        print(h_i, feat_a)
+        ###########################
+        # Try to retrieve v from k:
+        ###########################
+        head = 0
+        Wk_h_pinv = torch.linalg.pinv(Wk_h[head])
 
-        mk_h_i_a = torch.matmul(Wk_h[h_i, feat_a], x_tensor[:, -1].T)
-        print("Unique", len(torch.unique(mk_h_i_a)))
-        ax_ravel[i].hist(mk_h_i_a, bins=50)
-        ax_ravel[i].axvline(mk_h_i_a.mean(), color='k', linestyle='dashed')
-        ax_ravel[i].set_title(f"m^k_{{{h_i},{feat_a}}}")
+        v_h = model.transformer.h[layer_i].attn.v[0, head, :, :]
+        k_h = model.transformer.h[layer_i].attn.k[0, head, :, :]
+        v_hat_pinv_h = k_h @ Wk_h_pinv.T @ Wv_h[head].T
 
+        W_lsq, residuals, rank, s = torch.linalg.lstsq(k_h, v_h, rcond=None, driver="gels")
 
-    print("Plot v")
-    for i in range(6 , 9):
-        # Examine feat feat_a from head h_i for different samples
-        h_i = torch.randint(model.config.n_head, (1,))[0]
-        feat_a = torch.randint(model.config.n_embd // model.config.n_head, (1,))[0]
-        print(h_i, feat_a)
+        seq_len = model.transformer.h[layer_i].attn.k.size(2)
+        W_lsq_incomp, residuals_half, rank_half, s_half = torch.linalg.lstsq(k_h[int(seq_len / 2):], v_h[int(seq_len / 2):],
+                                                                             rcond=None, driver="gels")
 
-        mv_h_i_a = torch.matmul(Wv_h[h_i, feat_a], x_tensor[:, -1].T)
-        print("Unique", len(torch.unique(mv_h_i_a)))
-        ax_ravel[i].hist(mv_h_i_a, bins=50)
-        ax_ravel[i].axvline(mv_h_i_a.mean(), color='k', linestyle='dashed')
-        ax_ravel[i].set_title(f"m^v_{{{h_i},{feat_a}}}")
+        print("W_lsq", W_lsq)
+        print("W_lsq_incomp", W_lsq_incomp)
+        print("Diff", W_lsq - W_lsq_incomp)
+
+        v_hat_lsq_h = k_h @ W_lsq
+        v_hat_lsq_h_half = k_h @ W_lsq_incomp  # Compute all v's with the W learnt from only some of the tokens
 
 
-    fig.show()
-    plt.close(fig)
+        fig, ax = plt.subplots(4, 1)
+        idxs = [0, int(seq_len / 3), 2 * int(seq_len / 3), -1]
+        for i in range(0, 4):
+            ax[i].plot(v_h[idxs[i]], label='orig')
+            ax[i].plot(v_hat_lsq_h[idxs[i]], "--", label="pred lsq")
+            ax[i].plot(v_hat_lsq_h_half[idxs[i]], ":", label="pred lsq_incomp")
+            ax[i].plot(v_hat_pinv_h[idxs[i]], "--", alpha=0.7, label="pred pinv")
+        plt.legend()
+        plt.show()
+        plt.close()
 
-    # print(torch.allclose(mq_h, q_tensor[0, -1, :]))
 
-    print()
+        # Explore projection
+        head = 0
+        Wk_h_pinv = torch.linalg.pinv(Wk_h[head])
+        y_hat_h_pinv = model.transformer.h[layer_i].attn.y_k_hat_h @ Wk_h_pinv.T @ Wv_h[head].T
+        y_hat_h_lsq = model.transformer.h[layer_i].attn.y_k_hat_h @ W_lsq
 
-    # # Compute first mean and variances of x
-    # # Do this in torch.no_grad or memory requirements will scale
-    # x_mean = torch.mean(x_tensor, dim=0)
-    # x_sq_mean = torch.mean(x_tensor**2, dim=0)
-    # x_var = x_mean**2 - x_sq_mean
-    #
-    # feat_mean = torch.matmul(x_mean, model.lm_head.weight.T) / gptconf.n_embd
-    #
-    # num_cov_samples = 5000
-    # feat_cov_t_ab_tensor = torch.zeros((num_cov_samples, max_new_tokens))
-    # for r in range(num_cov_samples):
-    #     # Compute covariances for features a and b
-    #     a, b = torch.randint(gptconf.vocab_size, (2,))
-    #
-    #     feat_cov_t_ab_tensor[r] = torch.einsum('i,i,ti->t', model.lm_head.weight[a], model.lm_head.weight[b], x_var) / gptconf.n_embd ** 2
-    #
-    #
-    #
-    # d_list = [0]
-    # for d in d_list:
-    #     fig, ax = plt.subplots(1, 3)
-    #     print("Check step", d)
-    #     ax[0].hist(original_m[d], bins=100)
-    #     ax[0].set_title(rf"original $m^{{out}}_{{a,t={d}}}$")
-    #     ax[1].hist(feat_mean[d], bins=100)
-    #     ax[1].set_title(rf"$m^{{out}}_{{a,t={d}}}$")
-    #     ax[2].hist(feat_cov_t_ab_tensor[:, d], bins=100)
-    #     ax[2].set_title(rf"sample $\Sigma^{{out}}_{{a,b,t={d}}}$")
-    #     fig.suptitle("t = " + str(d))
-    #     print(feat_mean)
-    #     print()
-    #
-    #     fig.show()
-    #     plt.close(fig)
-    # import pdb; pdb.set_trace()
-    #
+        W_v_hat = W_lsq @ Wk_h[0]
+
+        print("diff W", W_v_hat - Wv_h[0])
+        print("diff att", model.transformer.h[layer_i].attn.y_h - y_hat_h_lsq)
+
+        plt.figure()
+        plt.plot(model.transformer.h[layer_i].attn.y_h, label='original')
+        plt.plot(y_hat_h_lsq, ":", label="pred lsq")
+        plt.plot(y_hat_h_pinv, label="pred pinv")
+        plt.legend()
+        plt.show()
+        plt.close()
+
+        print(model.transformer.h[layer_i].attn.y_h)
+        print(y_hat_h_lsq)
+        print(y_hat_h_pinv)
+
+        # To get the projection for all the heads with some x:
+        mq_h = torch.matmul( Wq_h, x_tensor[0, -1])
+
+
+        fig, ax = plt.subplots(3, 3)
+        ax_ravel = ax.ravel()
+        print("Plot q")
+        for i in range(0, 3):
+            # Examine feat feat_a from head h_i for different samples
+            h_i = torch.randint(model.config.n_head, (1,))[0]
+            feat_a = torch.randint(model.config.n_embd // model.config.n_head, (1,))[0]
+            print(h_i, feat_a)
+
+            mq_h_i_a = torch.matmul(Wq_h[h_i, feat_a], x_tensor[:, -1].T)
+            print("Unique", len(torch.unique(mq_h_i_a)))
+            ax_ravel[i].hist(mq_h_i_a, bins=50)
+            ax_ravel[i].axvline(mq_h_i_a.mean(), color='k', linestyle='dashed')
+            ax_ravel[i].set_title(f"m^q_{{{h_i},{feat_a}}}")
+
+
+        print("Plot k")
+        for i in range(3, 6):
+            # Examine feat feat_a from head h_i for different samples
+            h_i = torch.randint(model.config.n_head, (1,))[0]
+            feat_a = torch.randint(model.config.n_embd // model.config.n_head, (1,))[0]
+            print(h_i, feat_a)
+
+            mk_h_i_a = torch.matmul(Wk_h[h_i, feat_a], x_tensor[:, -1].T)
+            print("Unique", len(torch.unique(mk_h_i_a)))
+            ax_ravel[i].hist(mk_h_i_a, bins=50)
+            ax_ravel[i].axvline(mk_h_i_a.mean(), color='k', linestyle='dashed')
+            ax_ravel[i].set_title(f"m^k_{{{h_i},{feat_a}}}")
+
+
+        print("Plot v")
+        for i in range(6 , 9):
+            # Examine feat feat_a from head h_i for different samples
+            h_i = torch.randint(model.config.n_head, (1,))[0]
+            feat_a = torch.randint(model.config.n_embd // model.config.n_head, (1,))[0]
+            print(h_i, feat_a)
+
+            mv_h_i_a = torch.matmul(Wv_h[h_i, feat_a], x_tensor[:, -1].T)
+            print("Unique", len(torch.unique(mv_h_i_a)))
+            ax_ravel[i].hist(mv_h_i_a, bins=50)
+            ax_ravel[i].axvline(mv_h_i_a.mean(), color='k', linestyle='dashed')
+            ax_ravel[i].set_title(f"m^v_{{{h_i},{feat_a}}}")
+
+
+        fig.show()
+        plt.close(fig)
+
+        # print(torch.allclose(mq_h, q_tensor[0, -1, :]))
+
+        print()
+
+        # # Compute first mean and variances of x
+        # # Do this in torch.no_grad or memory requirements will scale
+        # x_mean = torch.mean(x_tensor, dim=0)
+        # x_sq_mean = torch.mean(x_tensor**2, dim=0)
+        # x_var = x_mean**2 - x_sq_mean
+        #
+        # feat_mean = torch.matmul(x_mean, model.lm_head.weight.T) / gptconf.n_embd
+        #
+        # num_cov_samples = 5000
+        # feat_cov_t_ab_tensor = torch.zeros((num_cov_samples, max_new_tokens))
+        # for r in range(num_cov_samples):
+        #     # Compute covariances for features a and b
+        #     a, b = torch.randint(gptconf.vocab_size, (2,))
+        #
+        #     feat_cov_t_ab_tensor[r] = torch.einsum('i,i,ti->t', model.lm_head.weight[a], model.lm_head.weight[b], x_var) / gptconf.n_embd ** 2
+        #
+        #
+        #
+        # d_list = [0]
+        # for d in d_list:
+        #     fig, ax = plt.subplots(1, 3)
+        #     print("Check step", d)
+        #     ax[0].hist(original_m[d], bins=100)
+        #     ax[0].set_title(rf"original $m^{{out}}_{{a,t={d}}}$")
+        #     ax[1].hist(feat_mean[d], bins=100)
+        #     ax[1].set_title(rf"$m^{{out}}_{{a,t={d}}}$")
+        #     ax[2].hist(feat_cov_t_ab_tensor[:, d], bins=100)
+        #     ax[2].set_title(rf"sample $\Sigma^{{out}}_{{a,b,t={d}}}$")
+        #     fig.suptitle("t = " + str(d))
+        #     print(feat_mean)
+        #     print()
+        #
+        #     fig.show()
+        #     plt.close(fig)
+        # import pdb; pdb.set_trace()
+        #
