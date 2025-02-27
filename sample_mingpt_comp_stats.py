@@ -8,6 +8,8 @@ import torch
 import tiktoken
 from model_tests import GPTConfig, GPT
 import matplotlib.pyplot as plt
+from explore_statistics import compute_v_k_prediction, compute_means, hist_2D
+
 
 # -----------------------------------------------------------------------------
 init_from = 'gpt2' # either 'resume' (from an out_dir) or a gpt2 variant (e.g. 'gpt2-xl')
@@ -19,10 +21,10 @@ out_dir = 'out-shakespeare-gpu' # ignored if init_from is not 'resume'
 # start = "FILE:text_sample/sample_long_gpt2_2.txt"
 # start = "\nThe Lion King was conceived during conversations among various Disney executives, to whom several writers submitted early treatments. Original director George Scribner had envisioned"
 start = "\nNeuroscience is the scientific study of the nervous system (the brain, spinal cord, and peripheral nervous system), its functions, and its disorders. It is a multidisciplinary science that combines"
-num_samples = 1 # number of samples to draw
+num_samples = 100 # number of samples to draw
 max_new_tokens = 2 # number of tokens generated in each sample
-temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
-top_k = 200 # retain only the top_k most likely tokens, clamp others to have 0 probability
+temperature = 1.0 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
+top_k = 2000 # retain only the top_k most likely tokens, clamp others to have 0 probability
 seed = 1337
 device = 'cpu' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float32' # 'float32' or 'bfloat16' or 'float16'
@@ -119,6 +121,8 @@ with torch.no_grad():
                 print('---------------')
 
 
+    # Once all samples have been computed, compute statistics
+
     for layer_i in [0, -1]:
 
         if layer_i == 0:
@@ -142,64 +146,17 @@ with torch.no_grad():
         ###########################
         # Try to retrieve v from k:
         ###########################
+
         head = 0
-        Wk_h_pinv = torch.linalg.pinv(Wk_h[head])
+        compute_v_k_prediction(Wk_h, Wv_h, layer_i, head, model)
 
-        v_h = model.transformer.h[layer_i].attn.v[0, head, :, :]
-        k_h = model.transformer.h[layer_i].attn.k[0, head, :, :]
-        v_hat_pinv_h = k_h @ Wk_h_pinv.T @ Wv_h[head].T
-
-        W_lsq, residuals, rank, s = torch.linalg.lstsq(k_h, v_h, rcond=None, driver="gels")
-
-        seq_len = model.transformer.h[layer_i].attn.k.size(2)
-        W_lsq_incomp, residuals_half, rank_half, s_half = torch.linalg.lstsq(k_h[int(seq_len / 2):], v_h[int(seq_len / 2):],
-                                                                             rcond=None, driver="gels")
-
-        print("W_lsq", W_lsq)
-        print("W_lsq_incomp", W_lsq_incomp)
-        print("Diff", W_lsq - W_lsq_incomp)
-
-        v_hat_lsq_h = k_h @ W_lsq
-        v_hat_lsq_h_half = k_h @ W_lsq_incomp  # Compute all v's with the W learnt from only some of the tokens
-
-
-        fig, ax = plt.subplots(4, 1)
-        idxs = [0, int(seq_len / 3), 2 * int(seq_len / 3), -1]
-        for i in range(0, 4):
-            ax[i].plot(v_h[idxs[i]], label='orig')
-            ax[i].plot(v_hat_lsq_h[idxs[i]], "--", label="pred lsq")
-            ax[i].plot(v_hat_lsq_h_half[idxs[i]], ":", label="pred lsq_incomp")
-            ax[i].plot(v_hat_pinv_h[idxs[i]], "--", alpha=0.7, label="pred pinv")
-        plt.legend()
-        plt.show()
-        plt.close()
-
-
-        # Explore projection
-        head = 0
-        Wk_h_pinv = torch.linalg.pinv(Wk_h[head])
-        y_hat_h_pinv = model.transformer.h[layer_i].attn.y_k_hat_h @ Wk_h_pinv.T @ Wv_h[head].T
-        y_hat_h_lsq = model.transformer.h[layer_i].attn.y_k_hat_h @ W_lsq
-
-        W_v_hat = W_lsq @ Wk_h[0]
-
-        print("diff W", W_v_hat - Wv_h[0])
-        print("diff att", model.transformer.h[layer_i].attn.y_h - y_hat_h_lsq)
-
-        plt.figure()
-        plt.plot(model.transformer.h[layer_i].attn.y_h, label='original')
-        plt.plot(y_hat_h_lsq, ":", label="pred lsq")
-        plt.plot(y_hat_h_pinv, label="pred pinv")
-        plt.legend()
-        plt.show()
-        plt.close()
-
-        print(model.transformer.h[layer_i].attn.y_h)
-        print(y_hat_h_lsq)
-        print(y_hat_h_pinv)
+        ####
+        # Explore mean fields
+        ###
 
         # To get the projection for all the heads with some x:
-        mq_h = torch.matmul( Wq_h, x_tensor[0, -1])
+        sample_id = 1
+        mq_h = torch.matmul( Wq_h, x_tensor[sample_id])
 
 
         fig, ax = plt.subplots(3, 3)
@@ -207,51 +164,56 @@ with torch.no_grad():
         print("Plot q")
         for i in range(0, 3):
             # Examine feat feat_a from head h_i for different samples
-            h_i = torch.randint(model.config.n_head, (1,))[0]
-            feat_a = torch.randint(model.config.n_embd // model.config.n_head, (1,))[0]
-            print(h_i, feat_a)
-
-            mq_h_i_a = torch.matmul(Wq_h[h_i, feat_a], x_tensor[:, -1].T)
-            print("Unique", len(torch.unique(mq_h_i_a)))
-            ax_ravel[i].hist(mq_h_i_a, bins=50)
-            ax_ravel[i].axvline(mq_h_i_a.mean(), color='k', linestyle='dashed')
-            ax_ravel[i].set_title(f"m^q_{{{h_i},{feat_a}}}")
-
+            compute_means(ax_ravel[i], model, Wq_h, x_tensor, "q")
 
         print("Plot k")
         for i in range(3, 6):
             # Examine feat feat_a from head h_i for different samples
-            h_i = torch.randint(model.config.n_head, (1,))[0]
-            feat_a = torch.randint(model.config.n_embd // model.config.n_head, (1,))[0]
-            print(h_i, feat_a)
-
-            mk_h_i_a = torch.matmul(Wk_h[h_i, feat_a], x_tensor[:, -1].T)
-            print("Unique", len(torch.unique(mk_h_i_a)))
-            ax_ravel[i].hist(mk_h_i_a, bins=50)
-            ax_ravel[i].axvline(mk_h_i_a.mean(), color='k', linestyle='dashed')
-            ax_ravel[i].set_title(f"m^k_{{{h_i},{feat_a}}}")
-
+            compute_means(ax_ravel[i], model, Wk_h, x_tensor, "k")
 
         print("Plot v")
         for i in range(6 , 9):
-            # Examine feat feat_a from head h_i for different samples
-            h_i = torch.randint(model.config.n_head, (1,))[0]
-            feat_a = torch.randint(model.config.n_embd // model.config.n_head, (1,))[0]
-            print(h_i, feat_a)
+            compute_means(ax_ravel[i], model, Wq_h, x_tensor, "v")
 
-            mv_h_i_a = torch.matmul(Wv_h[h_i, feat_a], x_tensor[:, -1].T)
-            print("Unique", len(torch.unique(mv_h_i_a)))
-            ax_ravel[i].hist(mv_h_i_a, bins=50)
-            ax_ravel[i].axvline(mv_h_i_a.mean(), color='k', linestyle='dashed')
-            ax_ravel[i].set_title(f"m^v_{{{h_i},{feat_a}}}")
-
+        ax_ravel[0].legend(fontsize='xx-small')
 
         fig.show()
         plt.close(fig)
 
-        # print(torch.allclose(mq_h, q_tensor[0, -1, :]))
 
-        print()
+        #################
+        # 2D Hist
+        ###################
+
+        #  Compute 2D hists
+        W_2D_list = [[Wk_h, Wk_h], [Wq_h, Wq_h], [Wv_h, Wv_h], [Wk_h, Wq_h], [Wq_h, Wv_h], [Wv_h, Wk_h]]
+        W_2D_names_list = [["k", "k"], ["q", "q"], ["v", "v"], ["k", "q"], ["q", "v"], ["v", "k"]]
+
+        num_cols = 3
+        num_rows = 6
+        fig, ax = plt.subplots(num_rows, num_cols)
+        ax_ravel = ax.ravel()
+        for i in range(0, num_rows * num_cols):
+            # Get W
+            W_pair = W_2D_list[i // num_cols]
+            Wa = W_pair[0]
+            Wb = W_pair[1]
+
+            W_names = W_2D_names_list[i // num_cols]
+            W_namea = W_names[0]
+            W_nameb = W_names[1]
+
+            hist_2D(Wa, Wb, W_namea, W_nameb, model, x_tensor, ax)
+
+        ax_ravel[0].legend(fontsize='xx-small')
+
+        # fig.tight_layout()
+        fig.show()
+
+
+        ########################
+        # Explore QK interaction
+        ########################
 
         # # Compute first mean and variances of x
         # # Do this in torch.no_grad or memory requirements will scale

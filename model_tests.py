@@ -97,11 +97,10 @@ class CausalSelfAttention(nn.Module):
             if self.save_statistics:
 
                 y_k_hat = att @ k
-                h = 0
 
                 # Retrieve batch 0 and last token repr, for head h
-                self.y_k_hat_h = y_k_hat[0, h, -1, :]
-                self.y_h = y[0, h, -1, :]
+                self.y_k_hat_h = y_k_hat[0]
+                self.y_h = y[0]
 
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
 
