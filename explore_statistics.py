@@ -3,8 +3,26 @@ import torch
 from scipy.stats import norm
 
 
+def learn_v_k_transform(num_tokens, repeat, max_pos, vocab_size, model, Wk_h, Wv_h, layer_i=0, head=0):
 
-def compute_v_k_prediction(Wk_h, Wv_h, layer_i, head, model):
+    # tok_idx = torch.randint(vocab_size, (num_tokens,))
+    # tok_idx = torch.repeat_interleave(tok_idx, repeat)
+    tok_idx = torch.arange(vocab_size).repeat(repeat)
+    tok_pos = torch.randint(max_pos, (vocab_size * repeat,))
+    tok_emb = model.transformer.wte(tok_idx)  # token embeddings of shape (b, t, n_embd)
+    pos_emb = model.transformer.wpe(tok_pos)  # position embeddings of shape (t, n_embd)
+    tokens = tok_emb + pos_emb
+    tokens_ln = model.transformer.h[layer_i].ln_1(tokens)
+
+    v_h =  tokens_ln @ Wv_h[head].T
+    k_h =  tokens_ln @ Wk_h[head].T
+
+    W_lsq, residuals, rank, s = torch.linalg.lstsq(k_h, v_h, rcond=None, driver="gels")
+
+    return W_lsq
+
+
+def compute_v_k_prediction(Wk_h, Wv_h, layer_i, head, model, W_slq_layer0=None):
 
     # Compute pseudo inverse for Wk
     Wk_h_pinv = torch.linalg.pinv(Wk_h[head])
@@ -25,13 +43,20 @@ def compute_v_k_prediction(Wk_h, Wv_h, layer_i, head, model):
     W_lsq_incomp, residuals_half, rank_half, s_half = torch.linalg.lstsq(k_h[int(seq_len / 2):], v_h[int(seq_len / 2):],
                                                                          rcond=None, driver="gels")
 
+    W_lsq_interleave, residuals_half, rank_half, s_half = torch.linalg.lstsq(k_h[::2], v_h[::2],
+                                                                         rcond=None, driver="gels")
+
     print("W_lsq", W_lsq)
     print("W_lsq_incomp", W_lsq_incomp)
     print("Diff", W_lsq - W_lsq_incomp)
 
     # v predictions
     v_hat_lsq_h = k_h @ W_lsq
-    v_hat_lsq_h_half = k_h @ W_lsq_incomp  # Compute all v's with the W learnt from only some of the tokens
+    v_hat_lsq_h_half = k_h @ W_lsq_incomp  # Compute all v's with the W learnt from only some of the
+    v_hat_lsq_h_interleave = k_h @ W_lsq_interleave  # Compute all v's with the W learnt from every 2 tokens
+
+    if W_slq_layer0 is not None:
+        v_hat_lsq_layer_0 = k_h @ W_slq_layer0 #
 
     fig, ax = plt.subplots(4, 1)
     idxs = [0, int(seq_len / 3), 2 * int(seq_len / 3), -1]
@@ -39,11 +64,34 @@ def compute_v_k_prediction(Wk_h, Wv_h, layer_i, head, model):
         ax[i].plot(v_h[idxs[i]], label='orig')
         ax[i].plot(v_hat_lsq_h[idxs[i]], "--", label="pred lsq")
         ax[i].plot(v_hat_lsq_h_half[idxs[i]], ":", label="pred lsq_incomp")
+        ax[i].plot(v_hat_lsq_h_interleave[idxs[i]], ":", label="pred lsq_every2")
+        if W_slq_layer0 is not None:
+            ax[i].plot(v_hat_lsq_layer_0[idxs[i]], "-.", label="pred lsq_sample")
         ax[i].plot(v_hat_pinv_h[idxs[i]], "--", alpha=0.7, label="pred pinv")
     plt.legend()
     plt.suptitle(f"Layer {layer_i}")
     plt.show()
     plt.close()
+
+    # Compute rmse
+
+    norm_lsq = torch.norm(v_h - v_hat_lsq_h, dim=1)
+    norm_lsq_half = torch.norm(v_h - v_hat_lsq_h_half, dim=1)
+    norm_lsq_interleave = torch.norm(v_h - v_hat_lsq_h_interleave, dim=1)
+    norm_lsq_layer0 = torch.norm(v_h - v_hat_lsq_layer_0, dim=1)
+    norm_pinv = torch.norm(v_h - v_hat_pinv_h, dim=1)
+
+    fig = plt.figure()
+    plt.plot(norm_lsq, label="LSQ")
+    plt.plot(norm_lsq_half, label="LSQ_half")
+    plt.plot(norm_lsq_interleave, label="LSQ_interleave")
+    plt.plot(norm_lsq_layer0, label="LSQ_sample")
+    plt.plot(norm_pinv, label="PINV")
+    plt.suptitle("RMSE")
+    plt.legend()
+    plt.show()
+    plt.close()
+
 
     # Explore attention projection
     token_idx = -1  # Choose the temporal instant for which to compute the attention score y

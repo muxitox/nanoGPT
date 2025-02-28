@@ -8,7 +8,7 @@ import torch
 import tiktoken
 from model_tests import GPTConfig, GPT
 import matplotlib.pyplot as plt
-from explore_statistics import compute_v_k_prediction, compute_means, hist_2D
+from explore_statistics import compute_v_k_prediction, compute_means, hist_2D, learn_v_k_transform
 
 
 # -----------------------------------------------------------------------------
@@ -146,9 +146,17 @@ with torch.no_grad():
         ###########################
         # Try to retrieve v from k:
         ###########################
+        head = 1
 
-        head = 0
-        compute_v_k_prediction(Wk_h, Wv_h, layer_i, head, model)
+
+        # Learn Wv Wk representation
+        num_tokens_sample =  model.config.vocab_size
+        repeat = 8  # Number of times each token is repeated with different positions
+        max_pos = 500
+        W_layer0 = learn_v_k_transform(num_tokens_sample, repeat, max_pos, model.config.vocab_size, model, Wk_h, Wv_h,
+                                       layer_i=layer_i, head=head)
+
+        compute_v_k_prediction(Wk_h, Wv_h, layer_i, head, model, W_slq_layer0=W_layer0)
 
         ####
         # Explore mean fields
