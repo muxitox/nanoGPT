@@ -75,7 +75,6 @@ def compute_v_k_prediction(Wk_h, Wv_h, layer_i, head, model, W_slq_layer0=None):
     plt.close()
 
     # Compute rmse
-
     rmse_lsq = torch.sqrt(torch.mean((v_h - v_hat_lsq_h)**2, dim=1))
     rmse_lsq_half = torch.norm(v_h - v_hat_lsq_h_half, p=2, dim=1)
     rmse_lsq_interleave = torch.norm(v_h - v_hat_lsq_h_interleave, p=2, dim=1)
