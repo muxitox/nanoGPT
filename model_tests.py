@@ -96,11 +96,24 @@ class CausalSelfAttention(nn.Module):
 
             if self.save_statistics:
 
+                ####
+                # Compute Multivariate Gaussian approx
+                ####
+                head = 0
+                k_mean = torch.mean(k[0,head], axis=0)
+                k_cov = torch.cov(k[0,head].T)
+                self.y_k_hat_normal = k_mean + k_cov @ q[0,head,-1] # Project wrt to last token
+
+                # Save y transformation with real att and key
                 y_k_hat = att @ k
 
-                # Retrieve batch 0 and last token repr, for head h
+                # Retrieve batch 0
                 self.y_k_hat_h = y_k_hat[0]
                 self.y_h = y[0]
+
+                # Compare gaussian prediction
+                sq_errors = (self.y_k_hat_h[head,-1] - self.y_k_hat_normal)**2
+                rmse_pred = torch.sqrt(torch.mean(sq_errors))
 
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
 
@@ -371,7 +384,6 @@ class GPT(nn.Module):
         """
         x_matrix_ini = torch.zeros(max_new_tokens, self.config.n_embd, device=idx.device)
         x_matrix_end = torch.zeros(max_new_tokens, self.config.n_embd, device=idx.device)
-        q_matrix = torch.zeros(max_new_tokens, self.config.n_head, self.config.n_embd // self.config.n_head, device=idx.device)
 
         probs_0 = torch.zeros(self.config.vocab_size, device=idx.device)
 

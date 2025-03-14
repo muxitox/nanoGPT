@@ -18,10 +18,11 @@ out_dir = 'out-shakespeare-gpu' # ignored if init_from is not 'resume'
 # start = "\nMy lord, cheerfully made" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
 # start = "\nWARWICK:\nWhat, wilt thou, wilt thou not, for thy head?\nQUEEN MARGARET:\nHow now, madam?"
 # start = "FILE:text_sample/sample_long.txt"
-# start = "FILE:text_sample/sample_long_gpt2_2.txt"
+start = "FILE:text_sample/sample_long_gpt2_2.txt"
 # start = "\nThe Lion King was conceived during conversations among various Disney executives, to whom several writers submitted early treatments. Original director George Scribner had envisioned"
-start = "\nNeuroscience is the scientific study of the nervous system (the brain, spinal cord, and peripheral nervous system), its functions, and its disorders. It is a multidisciplinary science that combines"
-num_samples = 100 # number of samples to draw
+# start = "\nNeuroscience is the scientific study of the nervous system (the brain, spinal cord, and peripheral nervous system), its functions, and its disorders. It is a multidisciplinary science that combines"
+# start = "FILE:text_sample/sample_midshort_gpt2_1.txt"
+num_samples = 1 # number of samples to draw
 max_new_tokens = 2 # number of tokens generated in each sample
 temperature = 1.0 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
 top_k = 2000 # retain only the top_k most likely tokens, clamp others to have 0 probability
@@ -146,8 +147,7 @@ with torch.no_grad():
         ###########################
         # Try to retrieve v from k:
         ###########################
-        head = 1
-
+        head = 0
 
         # Learn Wv Wk representation
         num_tokens_sample =  model.config.vocab_size
@@ -163,7 +163,7 @@ with torch.no_grad():
         ###
 
         # To get the projection for all the heads with some x:
-        sample_id = 1
+        sample_id = 0
         mq_h = torch.matmul( Wq_h, x_tensor[sample_id])
 
 

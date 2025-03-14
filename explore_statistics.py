@@ -63,11 +63,12 @@ def compute_v_k_prediction(Wk_h, Wv_h, layer_i, head, model, W_slq_layer0=None):
     for i in range(0, 4):
         ax[i].plot(v_h[idxs[i]], label='orig')
         ax[i].plot(v_hat_lsq_h[idxs[i]], "--", label="pred lsq")
-        ax[i].plot(v_hat_lsq_h_half[idxs[i]], ":", label="pred lsq_incomp")
-        ax[i].plot(v_hat_lsq_h_interleave[idxs[i]], ":", label="pred lsq_every2")
+        ax[i].plot(v_hat_lsq_h_half[idxs[i]], ":", label="pred lsq_half")
+        ax[i].plot(v_hat_lsq_h_interleave[idxs[i]], ":", label="pred lsq_interleave")
         if W_slq_layer0 is not None:
             ax[i].plot(v_hat_lsq_layer_0[idxs[i]], "-.", label="pred lsq_sample")
         ax[i].plot(v_hat_pinv_h[idxs[i]], "--", alpha=0.7, label="pred pinv")
+    ax[-1].set_xlabel("layer features")
     plt.legend()
     plt.suptitle(f"Layer {layer_i}")
     plt.show()
@@ -75,18 +76,19 @@ def compute_v_k_prediction(Wk_h, Wv_h, layer_i, head, model, W_slq_layer0=None):
 
     # Compute rmse
 
-    norm_lsq = torch.norm(v_h - v_hat_lsq_h, dim=1)
-    norm_lsq_half = torch.norm(v_h - v_hat_lsq_h_half, dim=1)
-    norm_lsq_interleave = torch.norm(v_h - v_hat_lsq_h_interleave, dim=1)
-    norm_lsq_layer0 = torch.norm(v_h - v_hat_lsq_layer_0, dim=1)
-    norm_pinv = torch.norm(v_h - v_hat_pinv_h, dim=1)
+    rmse_lsq = torch.sqrt(torch.mean((v_h - v_hat_lsq_h)**2, dim=1))
+    rmse_lsq_half = torch.norm(v_h - v_hat_lsq_h_half, p=2, dim=1)
+    rmse_lsq_interleave = torch.norm(v_h - v_hat_lsq_h_interleave, p=2, dim=1)
+    rmse_lsq_layer0 = torch.norm(v_h - v_hat_lsq_layer_0, p=2, dim=1)
+    rmse_pinv = torch.norm(v_h - v_hat_pinv_h, p=2, dim=1)
 
     fig = plt.figure()
-    plt.plot(norm_lsq, label="LSQ")
-    plt.plot(norm_lsq_half, label="LSQ_half")
-    plt.plot(norm_lsq_interleave, label="LSQ_interleave")
-    plt.plot(norm_lsq_layer0, label="LSQ_sample")
-    plt.plot(norm_pinv, label="PINV")
+    plt.plot(rmse_lsq_half, "--",label="LSQ_half")
+    plt.plot(rmse_lsq_interleave, ":", label="LSQ_interleave")
+    plt.plot(rmse_lsq_layer0, "-.", label="LSQ_sample")
+    plt.plot(rmse_pinv, label="PINV")
+    plt.plot(rmse_lsq, label="LSQ")
+    plt.xlabel("t")
     plt.suptitle("RMSE")
     plt.legend()
     plt.show()
@@ -100,6 +102,12 @@ def compute_v_k_prediction(Wk_h, Wv_h, layer_i, head, model, W_slq_layer0=None):
     y_hat_h_pinv = y_k_hat_h @ Wk_h_pinv.T @ Wv_h[head].T
     y_hat_h_lsq = y_k_hat_h @ W_lsq
 
+    # Explore proyection with the multivariate normal
+    # Only computed for head 0
+    if head == 0:
+        y_k_hat_normal = model.transformer.h[layer_i].attn.y_k_hat_normal
+        y_hat_h_normal_lsq = y_k_hat_normal @ W_lsq
+
     y_h = model.transformer.h[layer_i].attn.y_h[head, token_idx, :]
 
     W_v_hat = W_lsq @ Wk_h[head]
@@ -111,6 +119,8 @@ def compute_v_k_prediction(Wk_h, Wv_h, layer_i, head, model, W_slq_layer0=None):
     plt.plot(y_h, label='original')
     plt.plot(y_hat_h_lsq, ":", label="pred lsq")
     plt.plot(y_hat_h_pinv, label="pred pinv")
+    if head == 0:
+        plt.plot(y_hat_h_normal_lsq, label="pred gaussian")
     plt.legend()
     plt.show()
     plt.close()
