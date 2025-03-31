@@ -22,7 +22,7 @@ def learn_v_k_transform(num_tokens, repeat, max_pos, vocab_size, model, Wk_h, Wv
     return W_lsq
 
 
-def compute_v_k_prediction(Wk_h, Wv_h, layer_i, head, model, W_slq_layer0=None):
+def compute_v_k_prediction(Wk_h, Wv_h, layer_i, head, model, W_slq_layer0=None, T=None):
 
     # Compute pseudo inverse for Wk
     Wk_h_pinv = torch.linalg.pinv(Wk_h[head])
@@ -116,10 +116,16 @@ def compute_v_k_prediction(Wk_h, Wv_h, layer_i, head, model, W_slq_layer0=None):
 
     plt.figure()
     plt.plot(y_h, label='original')
-    plt.plot(y_hat_h_lsq, ":", label="pred lsq")
-    plt.plot(y_hat_h_pinv, label="pred pinv")
     if head == 0:
-        plt.plot(y_hat_h_normal_lsq, label="pred gaussian")
+        plt.plot(y_hat_h_normal_lsq, ":", label="pred gaussian")
+        rmse_att_gaussian = torch.sqrt(torch.mean((y_h - y_hat_h_normal_lsq) ** 2))
+
+        T_str = ""
+        if T is not None:
+            T_str = f"T={T}"
+
+        plt.title(f"V-Att - {T_str} Context_size {v_h.shape[0]} RMSE {rmse_att_gaussian}")
+
     plt.legend()
     plt.show()
     plt.close()
@@ -185,4 +191,51 @@ def hist_2D(Wa, Wb, W_namea, W_nameb, model, x_tensor, ax):
     ax.hist2d(m_h_i_a, m_h_i_b, bins=50)
     ax.set_title(
         rf"$m^{W_namea}_{{h_{{{h_i}}},a_{{{feat_a}}}}}$ vs $m^{W_nameb}_{{h_{{{h_i}}},b_{{{feat_b}}}}}$")
+
+
+def compute_q_samples_k_means(ax, model, Wq_h, Wk_h, x_tensor, x_tau_values_tensor, tau_value):
+    # Examine feat feat_a from head h_i for different samples
+    h_i = torch.randint(model.config.n_head, (1,))[0]
+    feat_a = torch.randint(model.config.n_embd // model.config.n_head, (1,))[0]
+    mq_h_i_a = torch.matmul(Wq_h[h_i, feat_a], x_tensor.T).cpu()
+    mk_tau_h_i_a = torch.matmul(Wk_h[h_i, feat_a], x_tau_values_tensor.T).cpu()
+
+    # Now make pointwise product
+    mqk_tau_h_i_a = mq_h_i_a * mk_tau_h_i_a
+
+    # Pre-compute hist
+    density = True
+    num_bins = 50
+    hist, bin_edges = torch.histogram(mqk_tau_h_i_a, bins=num_bins, density=density)
+
+    ax.stairs(hist, bin_edges, fill=True, label="MostProb")
+    ax.axvline(mqk_tau_h_i_a.mean(), color='k', linestyle='dashed', alpha=0.7,
+                        label="Total Mean")
+    ax.set_title(rf"$m^{{qk}}_{{h_{{{h_i}}},a_{{{feat_a}}},tau_{{{tau_value}}}}}$")
+
+
+def compute_q_k_history_means(ax, Wq_h, Wk_h, x_history, h_i, t):
+    # Examine feat feat_a from head h_i for different samples
+    x_t = x_history[0, t, :]
+    x_all_tau = x_history[0, :t, :]
+
+    mq_t_h_i = torch.matmul(Wq_h[h_i, :], x_t.T)
+    mk_tau_h_i_tau = torch.matmul(Wk_h[h_i, :], x_all_tau.T)
+
+    mqk = torch.matmul(mq_t_h_i, mk_tau_h_i_tau)
+
+    # Pre-compute hist
+    density = True
+    num_bins = 50
+    hist, bin_edges = torch.histogram(mqk.cpu(), bins=num_bins, density=density)
+
+    # Compute Gaussian
+    x_values_gauss = torch.linspace(mqk.cpu().min(), mqk.cpu().max(), steps=1000)
+    gaussian = norm.pdf(x_values_gauss, mqk.mean().cpu(), mqk.std().cpu())
+
+    ax.stairs(hist, bin_edges, fill=True, label="MostProb")
+    ax.plot(x_values_gauss, gaussian, color="darkred")
+    ax.axvline(mqk.mean().cpu(), color='k', linestyle='dashed', alpha=0.7,
+                        label="Total Mean")
+    ax.set_title(rf"$m^{{qk}}_{{h_{{{h_i}}},t_{{{t}}}}}$")
 
