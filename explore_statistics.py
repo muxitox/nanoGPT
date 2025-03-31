@@ -237,5 +237,5 @@ def compute_q_k_history_means(ax, Wq_h, Wk_h, x_history, h_i, t):
     ax.plot(x_values_gauss, gaussian, color="darkred")
     ax.axvline(mqk.mean().cpu(), color='k', linestyle='dashed', alpha=0.7,
                         label="Total Mean")
-    ax.set_title(rf"$m^{{qk}}_{{h_{{{h_i}}},t_{{{t}}}}}$")
+    ax.set_title(rf"$m^{{qk}}_{{h_{{{h_i[0]}}},t_{{{t}}}}}$")
 
