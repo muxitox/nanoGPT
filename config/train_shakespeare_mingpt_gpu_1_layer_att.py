@@ -2,7 +2,7 @@
 # good for debugging and playing on macbooks and such
 
 out_dir = 'out-shakespeare-gpu-1-layer-att'
-eval_interval = 100 # keep frequent because we'll overfit
+eval_interval = 50 # keep frequent because we'll overfit
 eval_iters = 200
 log_interval = 50 # don't print too too often
 
@@ -24,10 +24,10 @@ n_head = 12
 n_embd = 768
 dropout = 0.01 # No dropout
 
-learning_rate = 1e-3 # with baby networks can afford to go a bit higher
-max_iters = 1000
-lr_decay_iters = 1000 # make equal to max_iters usually
-min_lr = 1e-4 # learning_rate / 10 usually
+learning_rate = 1e-4 # with baby networks can afford to go a bit higher
+max_iters = 500
+lr_decay_iters = 500 # make equal to max_iters usually
+min_lr = 1e-5 # learning_rate / 10 usually
 beta2 = 0.99 # make a bit bigger because number of tokens per iter is small
 
 warmup_iters = 100 # not super necessary potentially
