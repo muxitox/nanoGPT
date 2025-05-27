@@ -22,13 +22,15 @@ out_dir = 'out-shakespeare-gpu' # ignored if init_from is not 'resume'
 # start = "FILE:text_sample/sample_long.txt"
 # start = "FILE:text_sample/sample_long_gpt2_2.txt"
 # start = "\nThe Lion King was conceived during conversations among various Disney executives, to whom several writers submitted early treatments. Original director George Scribner had envisioned"
-start = "\nNeuroscience is the scientific study of the nervous system (the brain, spinal cord, and peripheral nervous system), its functions, and its disorders. It is a multidisciplinary science that combines"
+# start = "\nNeuroscience is the scientific study of the nervous system (the brain, spinal cord, and peripheral nervous system), its functions, and its disorders. It is a multidisciplinary science that combines"
 sample_T = "1.0"
-# start = f"FILE:text_sample/T_{sample_T}_topk_200/sample_gpt2_seed4_2_long.txt"
+# sample_folder = "text_sample_double_length"
+sample_folder = "text_sample"
+start = f"FILE:{sample_folder}/T_{sample_T}_topk_200/sample_gpt2_seed4_2_long.txt"
 
 # t1.4 seed 4 3, problem with scale?
 
-num_samples = 5 # number of samples to draw
+num_samples = 1 # number of samples to draw
 max_new_tokens = 2 # number of tokens generated in each sample
 temperature = 1.0 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
 top_k = 2000 # retain only the top_k most likely tokens, clamp others to have 0 probability
@@ -105,11 +107,12 @@ num_mqk_plots = 9
 context_length = len(start_ids)
 # Get random indices of tokens from the context against which we'll compute statistics
 num_tau_probe = num_mqk_plots
-tau_probe_values = torch.randint(max(1, context_length - max_new_tokens), (num_tau_probe,))
+tau_probe_values = torch.randint(min(max(1, context_length - max_new_tokens), model.config.block_size), (num_tau_probe,))
 x_tau_values_tensor_ini = torch.zeros((num_samples, num_tau_probe, model.config.n_embd), device=device)
 x_tau_values_tensor_end = torch.zeros((num_samples, num_tau_probe, model.config.n_embd), device=device)
 
-
+# Define how many graphs to show for the qk interaction probing
+num_tau_probes = 9
 
 # run generation
 with torch.no_grad():
@@ -147,8 +150,9 @@ with torch.no_grad():
 
 
     # Once all samples have been computed, compute statistics
+    layers_to_examine = [0, -1]
 
-    for layer_i in [0, -1]:
+    for layer_i in layers_to_examine:
 
         if layer_i == 0:
             x_tensor = x_tensor_ini
@@ -165,12 +169,15 @@ with torch.no_grad():
 
         # Get separate weights
         Wq, Wk, Wv = model.transformer.h[layer_i].attn.c_attn.weight.split(model.config.n_embd)
+        bq, bk, bv = model.transformer.h[layer_i].attn.c_attn.bias.split(model.config.n_embd)
 
         # Divide weight in n_head heads
         Wq_h = Wq.view(model.config.n_head, model.config.n_embd // model.config.n_head, model.config.n_embd)
         Wk_h = Wk.view(model.config.n_head, model.config.n_embd // model.config.n_head, model.config.n_embd)
         Wv_h = Wv.view(model.config.n_head, model.config.n_embd // model.config.n_head, model.config.n_embd)
-
+        bq_h = bq.view(model.config.n_head, model.config.n_embd // model.config.n_head)
+        bk_h = bk.view(model.config.n_head, model.config.n_embd // model.config.n_head)
+        bv_h = bv.view(model.config.n_head, model.config.n_embd // model.config.n_head)
 
         ###########################
         # Try to retrieve v from k:
@@ -255,7 +262,6 @@ with torch.no_grad():
             # Compute averages of the qk product for different feats a's wrt to different times tau's
             # Sampled q's vs vs k at different tau
 
-            num_tau_probes = 9
             if context_length > num_tau_probes:
 
                 fig, ax = plt.subplots(3, 3, constrained_layout=True)
@@ -277,20 +283,23 @@ with torch.no_grad():
         if context_length > num_tau_probes:
 
             # Create a list of t values to see how the approximation evolves through time
-            t_list = torch.linspace(0, context_length - 2, steps=num_tau_probes + 1, dtype=torch.int)[1:]
+            t_list = torch.linspace(0, min(context_length, model.config.block_size) - 1, steps=num_tau_probes + 1, dtype=torch.int)[1:]
 
             # Show results for different heads
-            show_num_heads = 3
+            show_num_heads = 1
             for h_iter in range(0, show_num_heads):
 
-                h_i = torch.randint(model.config.n_head, (1,))[0]
+                # h_i = torch.randint(model.config.n_head, (1,))[0]
+                h_i = torch.arange(0, show_num_heads)
 
                 print("Examining head", h_i, "in the first layer.")
                 fig, ax = plt.subplots(3, 3, constrained_layout=True)
                 ax_ravel = ax.ravel()
 
+                m = model.config.n_embd // model.config.n_head
                 for t in range(0, num_tau_probes):
-                    compute_q_k_history_means(ax_ravel[t], Wq_h, Wk_h, x_history, h_i, t_list[t])
+
+                    compute_q_k_history_means(ax_ravel[t], Wq_h, Wk_h, bq_h, bk_h, x_history, h_i, t_list[t], m)
 
                 ax_ravel[0].legend(fontsize='xx-small')
                 # fig.tigth_layout()

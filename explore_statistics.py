@@ -1,7 +1,7 @@
 import matplotlib.pyplot as plt
 import torch
 from scipy.stats import norm
-
+import math
 
 def learn_v_k_transform(num_tokens, repeat, max_pos, vocab_size, model, Wk_h, Wv_h, layer_i=0, head=0):
 
@@ -107,6 +107,9 @@ def compute_v_k_prediction(Wk_h, Wv_h, layer_i, head, model, W_slq_layer0=None, 
         y_k_hat_normal = model.transformer.h[layer_i].attn.y_k_hat_normal
         y_hat_h_normal_lsq = y_k_hat_normal @ W_lsq
 
+        y_k_hat_normal_2ints = model.transformer.h[layer_i].attn.y_k_hat_normal_multi_two_integrals
+        y_k_hat_normal_2ints_lsq = y_k_hat_normal_2ints @ W_lsq
+
     y_h = model.transformer.h[layer_i].attn.y_h[head, token_idx, :]
 
     W_v_hat = W_lsq @ Wk_h[head]
@@ -117,14 +120,17 @@ def compute_v_k_prediction(Wk_h, Wv_h, layer_i, head, model, W_slq_layer0=None, 
     plt.figure()
     plt.plot(y_h, label='original')
     if head == 0:
-        plt.plot(y_hat_h_normal_lsq, ":", label="pred gaussian")
         rmse_att_gaussian = torch.sqrt(torch.mean((y_h - y_hat_h_normal_lsq) ** 2))
+        plt.plot(y_hat_h_normal_lsq, ":", label=f"pred MG E {rmse_att_gaussian:.3}")
+
+        rmse_att_gaussian_2ints = torch.sqrt(torch.mean((y_h - y_k_hat_normal_2ints_lsq) ** 2))
+        plt.plot(y_k_hat_normal_2ints_lsq, ":", label=f"pred MG2Ints E {rmse_att_gaussian_2ints:.3}")
 
         T_str = ""
         if T is not None:
             T_str = f"T={T}"
 
-        plt.title(f"V-Att - {T_str} Context_size {v_h.shape[0]} RMSE {rmse_att_gaussian}")
+        plt.title(f"V-Att - {T_str} Context_size {v_h.shape[0]}")
 
     plt.legend()
     plt.show()
@@ -193,12 +199,12 @@ def hist_2D(Wa, Wb, W_namea, W_nameb, model, x_tensor, ax):
         rf"$m^{W_namea}_{{h_{{{h_i}}},a_{{{feat_a}}}}}$ vs $m^{W_nameb}_{{h_{{{h_i}}},b_{{{feat_b}}}}}$")
 
 
-def compute_q_samples_k_means(ax, model, Wq_h, Wk_h, x_tensor, x_tau_values_tensor, tau_value):
+def compute_q_samples_k_means(ax, model, Wq_h, Wk_h, bq_h, bk_h, x_tensor, x_tau_values_tensor, tau_value):
     # Examine feat feat_a from head h_i for different samples
     h_i = torch.randint(model.config.n_head, (1,))[0]
     feat_a = torch.randint(model.config.n_embd // model.config.n_head, (1,))[0]
-    mq_h_i_a = torch.matmul(Wq_h[h_i, feat_a], x_tensor.T).cpu()
-    mk_tau_h_i_a = torch.matmul(Wk_h[h_i, feat_a], x_tau_values_tensor.T).cpu()
+    mq_h_i_a = (torch.matmul(Wq_h[h_i, feat_a], x_tensor.T)+ bq_h[h_i]).cpu()
+    mk_tau_h_i_a = (torch.matmul(Wk_h[h_i, feat_a], x_tau_values_tensor.T) + bk_h[h_i].T).cpu()
 
     # Now make pointwise product
     mqk_tau_h_i_a = mq_h_i_a * mk_tau_h_i_a
@@ -214,15 +220,15 @@ def compute_q_samples_k_means(ax, model, Wq_h, Wk_h, x_tensor, x_tau_values_tens
     ax.set_title(rf"$m^{{qk}}_{{h_{{{h_i}}},a_{{{feat_a}}},tau_{{{tau_value}}}}}$")
 
 
-def compute_q_k_history_means(ax, Wq_h, Wk_h, x_history, h_i, t):
+def compute_q_k_history_means(ax, Wq_h, Wk_h, bq_h, bk_h, x_history, h_i, t, m):
     # Examine feat feat_a from head h_i for different samples
     x_t = x_history[0, t, :]
-    x_all_tau = x_history[0, :t, :]
+    x_all_tau = x_history[0, :t+1, :]
 
-    mq_t_h_i = torch.matmul(Wq_h[h_i, :], x_t.T)
-    mk_tau_h_i_tau = torch.matmul(Wk_h[h_i, :], x_all_tau.T)
+    mq_t_h_i = torch.matmul(Wq_h[h_i, :], x_t.T) + bq_h[h_i]
+    mk_tau_h_i_tau = torch.matmul(Wk_h[h_i, :], x_all_tau.T) + bk_h[h_i].T
 
-    mqk = torch.matmul(mq_t_h_i, mk_tau_h_i_tau)
+    mqk = torch.matmul(mq_t_h_i, mk_tau_h_i_tau) * (1.0 / math.sqrt(m))
 
     # Pre-compute hist
     density = True

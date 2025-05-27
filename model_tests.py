@@ -13,8 +13,10 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
+from pydantic.v1.validators import number_multiple_validator
 from torch.nn import functional as F
 from torch.utils.hipify.hipify_python import compute_stats
+import matplotlib.pyplot as plt
 
 
 class LayerNorm(nn.Module):
@@ -59,12 +61,12 @@ class CausalSelfAttention(nn.Module):
     def forward(self, x):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
-
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-        q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
+        qo, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        q = qo.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        q2 = qo.view(B, T, self.n_head, C // self.n_head)
 
         if self.save_statistics:
 
@@ -89,8 +91,8 @@ class CausalSelfAttention(nn.Module):
         else:
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
-            att = F.softmax(att, dim=-1)
+            att_un = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+            att = F.softmax(att_un, dim=-1)
             att = self.attn_dropout(att)
             y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
 
@@ -100,9 +102,72 @@ class CausalSelfAttention(nn.Module):
                 # Compute Multivariate Gaussian approx
                 ####
                 head = 0
-                k_mean = torch.mean(k[0,head], axis=0)
-                k_cov = torch.cov(k[0,head].T)
-                self.y_k_hat_normal = k_mean + k_cov @ q[0,head,-1] # Project wrt to last token
+                k_multi_mean = torch.mean(k[0,head], axis=0)
+                k_multi_cov = torch.cov(k[0,head].T)
+
+                # Split the keys in half for more accurate results
+                i_half = int(len(k[0,0])/2)
+                k_fh = k[0, head, :i_half]
+                k_multi_mean_first_half = torch.mean(k_fh, axis=0)
+                k_multi_cov_first_half = torch.cov(k[0, head, :i_half].T)
+
+                k_sh = k[0, head, i_half:]
+                k_multi_mean_second_half = torch.mean(k_sh, axis=0)
+                k_multi_cov_second_half = torch.cov(k[0, head, i_half:].T)
+
+                # Approximation for only one integral
+                self.y_k_hat_normal = k_multi_mean + k_multi_cov @ q[0,head,-1] * (1.0 / math.sqrt(k.size(-1))) # Project wrt to last token
+                # Second term of the  numerator
+                numerator_second_term_first_half = k_multi_mean_first_half + k_multi_cov_first_half @ q[0,head,-1] * (1.0 / math.sqrt(k.size(-1)))
+                numerator_second_term_second_half = k_multi_mean_second_half + k_multi_cov_second_half @ q[0,head,-1] * (1.0 / math.sqrt(k.size(-1)))
+
+                # Compute denominator for the different methods
+                exp_denom = (q[0,head,-1] @ k[0,head,:].T) * (1.0 / math.sqrt(k.size(-1)))
+                print("Attentions")
+                print(exp_denom)
+
+                denom_att = torch.sum(torch.exp( exp_denom ))
+                denom_multigauss =  torch.exp(q[0,head,-1] @ k_multi_mean * (1.0 / math.sqrt(k.size(-1))) +
+                                                   q[0,head,-1].T @ k_multi_cov @ q[0,head,-1] / (2 * k.size(-1)))
+
+                denom_multigauss_first_half = torch.exp(
+                    q[0, head, -1] @ k_multi_mean_first_half * (1.0 / math.sqrt(k.size(-1))) +
+                    q[0, head, -1].T @ k_multi_cov_first_half @ q[0, head, -1] / (2 * k.size(-1)))
+
+                denom_multigauss_second_half = torch.exp(
+                    q[0, head, -1] @ k_multi_mean_second_half * (1.0 / math.sqrt(k.size(-1))) +
+                    q[0, head, -1].T @ k_multi_cov_second_half @ q[0, head, -1] / (2 * k.size(-1)))
+                denom_multigauss_compound = denom_multigauss_first_half + denom_multigauss_second_half
+
+                # Statistics for univariate Gaussian
+                exp_uni_denom_mean = torch.mean(exp_denom)
+                exp_uni_denom_std = torch.std(exp_denom)
+                denom_uni_unigauss = torch.exp(exp_uni_denom_mean + exp_uni_denom_std/2)
+
+                num_k_att = k[0,head,:].T @ torch.exp( (q[0,head,-1] @ k[0,head,:].T) * (1.0 / math.sqrt(k.size(-1)))  )
+                numer_multigauss = denom_multigauss * self.y_k_hat_normal
+
+
+                # Approximation. Numerator: multivariate. Denominator: Multivariate.
+                # Checking if without simplification the result is the same
+                y_k_hat_normal_uni_multi = numer_multigauss / denom_uni_unigauss
+                # Approximation. Multivariate with two integrals
+                self.y_k_hat_normal_multi_two_integrals = ((denom_multigauss_first_half *  numerator_second_term_first_half
+                                                      +  denom_multigauss_second_half *  numerator_second_term_second_half)
+                                                      / denom_multigauss_compound)
+
+
+                # # Plot covariances
+                #
+                # mat = plt.matshow(k_multi_cov)
+                # plt.colorbar(mat)
+                # plt.show()
+                # plt.close()
+                #
+                # mat1 = plt.matshow(k_multi_cov1)
+                # plt.colorbar(mat1)
+                # plt.show()
+                # plt.close()
 
                 # Save y transformation with real att and key
                 y_k_hat = att @ k
@@ -111,9 +176,52 @@ class CausalSelfAttention(nn.Module):
                 self.y_k_hat_h = y_k_hat[0]
                 self.y_h = y[0]
 
-                # Compare gaussian prediction
-                sq_errors = (self.y_k_hat_h[head,-1] - self.y_k_hat_normal)**2
-                rmse_pred = torch.sqrt(torch.mean(sq_errors))
+                fig, ax = plt.subplots(2,1)
+                ax[0].plot(self.y_k_hat_h[head,-1], label='original')
+                ax[1].plot(self.y_k_hat_h[head,-1], label='original')
+
+                if head == 0:
+
+                    # Compare gaussian prediction
+                    sq_errors_mgaussian = (self.y_k_hat_h[head, -1] - self.y_k_hat_normal) ** 2
+                    rmse_pred_mgaussian = torch.sqrt(torch.mean(sq_errors_mgaussian))
+                    print("RMSE y_k", rmse_pred_mgaussian)
+
+
+                    sq_errors_gaussian = (self.y_k_hat_h[head, -1] - y_k_hat_normal_uni_multi) ** 2
+                    rmse_pred_gaussian = torch.sqrt(torch.mean(sq_errors_gaussian))
+                    print("RMSE y_k", rmse_pred_mgaussian)
+
+                    sq_errors_mgaussian_twoints = (self.y_k_hat_h[head, -1] - self.y_k_hat_normal_multi_two_integrals) ** 2
+                    rmse_pred_mgaussian_twoints = torch.sqrt(torch.mean(sq_errors_mgaussian_twoints))
+                    print("RMSE y_k", rmse_pred_mgaussian_twoints)
+
+                    ax[0].plot(self.y_k_hat_normal, ":", label=f"MG E {rmse_pred_mgaussian:.3f}")
+                    ax[0].plot(self.y_k_hat_normal_multi_two_integrals, ":", label=f"MG2I E {rmse_pred_mgaussian_twoints:.3f}")
+                    ax[0].legend()
+
+                    ax[1].plot(y_k_hat_normal_uni_multi, ":", label=f"G E {rmse_pred_gaussian:.3f}")
+                    ax[1].legend()
+
+                    fig.suptitle(f"K-Att - Context_size {v.shape[2]}")
+
+
+                plt.show()
+                plt.close()
+
+                fig, ax = plt.subplots(1,3, figsize = (8,1.5))
+                ax[0].hist(exp_denom, bins=50)
+                ax[0].set_title(f"All")
+
+                ax[1].hist(exp_denom[:int(len(exp_denom) / 2)], bins=50)
+                ax[1].set_title(f"First half")
+
+                ax[2].hist(exp_denom[int(len(exp_denom)/2):], bins=50)
+                ax[2].set_title(f"Second half")
+
+                fig.suptitle(f"Att denominator components - Context_size {v.shape[2]}")
+                fig.show()
+                plt.close(fig)
 
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
 
