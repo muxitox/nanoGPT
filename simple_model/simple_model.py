@@ -113,7 +113,7 @@ for i in range(num_running_steps):
 rmse0 = torch.sqrt(torch.mean((tok_stats_avg - tok_stats_mf)**2))
 print("Error wrt to selected token", rmse0)
 
-rmse1 = torch.sqrt(torch.mean((tok_stats_avg - tok_0[0])**2))
+rmse1 = torch.sqrt(torch.mean((tok_0[0] -  tok_stats_mf)**2))
 print("Error wrt random token", rmse1)
 
 
@@ -127,7 +127,7 @@ plt.show()
 plt.close()
 
 plt.figure()
-token_comparison_id = 0
+token_comparison_id = 3545
 plt.plot(tok_0[token_comparison_id][:feats_to_plot], label="Random token")
 plt.plot(tok_stats_mf[step_to_plot][:feats_to_plot], label="MF")
 plt.title(f"Error wrt random vector {rmse1}")
