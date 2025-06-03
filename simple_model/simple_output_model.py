@@ -40,7 +40,7 @@ model_name = "gpt2"
 model = GPT.from_pretrained(model_name, dict(dropout=0.0))
 model.to(device)
 
-beta = 1000
+beta = 100000
 
 # Get embeddings to sample tokens from them
 wte = model.transformer.wte
@@ -49,7 +49,7 @@ token_size = wte.embedding_dim
 
 # Select new_emb_size tokens from the embedding to create a smaller vocabulary
 perm_idxs = torch.randperm(num_embeddings)
-new_emb_size = 150
+new_emb_size = 1000
 perm_idxs = perm_idxs[:new_emb_size]
 
 # Transform into token representation
