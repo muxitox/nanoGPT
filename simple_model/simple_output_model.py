@@ -66,23 +66,22 @@ w_mean = 0
 w_std = 1/(token_size)
 num_patterns = token_size
 W_k = torch.normal(w_mean, w_std, (token_size, num_patterns))
+W_q = torch.normal(w_mean, w_std, (token_size, num_patterns))
 
 q_is_roll = True
 if q_is_roll:
     W_q = torch.roll(W_k, -1, 0)
-else:
-    W_q = torch.normal(w_mean, w_std, (token_size, token_size))
 
 # Choose x_0
 idx_0 = 1
 tok_0 = tok_emb[idx_0]
 
 # Get mean and covariances from the vocabulary for the approximation
-embWk_mu = torch.mean(tok_emb @ W_k, dim=0)
-embWk_cov = torch.cov((tok_emb @ W_k).T)
+tok_emb_Wk_mu = torch.mean(tok_emb @ W_k, dim=0)
+tok_emb_Wk_cov = torch.cov((tok_emb @ W_k).T)
 
-emb_mu = torch.mean(tok_emb, dim=0)
-emb_cov = torch.cov((tok_emb).T)
+tok_emb_mu = torch.mean(tok_emb, dim=0)
+tok_emb_cov = torch.cov((tok_emb).T)
 
 
 ################################################
@@ -116,8 +115,8 @@ tok_stats_avg = torch.mean(tok_stats, dim=0)
 q_t = tok_0 @ W_q
 Wk_Wq_x_t = W_k @ q_t
 for t in range(num_running_steps):
-    muWk_t = forward_mf(embWk_mu, embWk_cov, q_t, beta)
-    mu_t = forward_mf(emb_mu, emb_cov, Wk_Wq_x_t, beta)
+    muWk_t = forward_mf(tok_emb_Wk_mu, tok_emb_Wk_cov, q_t, beta)
+    mu_t = forward_mf(tok_emb_mu, tok_emb_cov, Wk_Wq_x_t, beta)
     tok_stats_mf_Wk[t, :] = muWk_t
     tok_stats_mf[t, :] = mu_t
 
