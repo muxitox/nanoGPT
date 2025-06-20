@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from mpmath import arange
+from numpy.f2py.auxfuncs import throw_error
 from torch.nn import functional as F
 from model import GPTConfig, GPT
 
@@ -68,22 +69,40 @@ def plot_error_traj(gold_stat, other_stats, label, line, title):
     plt.legend()
     plt.show()
 
-def subplot_trajectories(stats, label, line, title, domain_label, random_feats=False):
-    fig, ax = plt.subplots(2, 2)
-    ax = ax.ravel()
-    if random_feats:
-        feats = torch.randperm(stats[0].shape[1])[:4]
-    else:
-        feats = torch.arange(4)
+def return_subplot(num_feats):
+    if num_feats == 1:
+        fig, ax = plt.subplots(1, 1)
+    elif num_feats == 2:
+        fig, ax = plt.subplots(1, 2)
+    elif num_feats == 3:
+        fig, ax = plt.subplots(1, 3)
+    else: # If more than 3 features, limit ourselves to 4 subplots to maintain visibility
+        fig, ax = plt.subplots(2, 2)
 
-    for i in range(0, 4):
+    return fig, ax
+
+def subplot_trajectories(stats, label, line, title, domain_label, random_feats=False):
+
+    T, num_feats = stats[0].shape
+    fig, ax = return_subplot(num_feats)
+    ax = ax.ravel()
+
+    num_feats_show = min(num_feats, 4)
+
+    if num_feats > 4:
+        if random_feats:
+            feats = torch.randperm(stats[0].shape[1])[:num_feats_show]
+    else:
+        feats = torch.arange(num_feats_show)
+
+    for i in range(0, num_feats_show):
         for s in range(len(stats)):
             ax[i].plot(stats[s][:,feats[i]], line[s], label=label[s])
 
-            ax[i].set_xlabel(f"${domain_label}_{{{feats[i]}}}$")
-            ax[i].set_ylabel(f"$t$")
+            ax[i].set_ylabel(f"${domain_label}_{{{feats[i]}}}$")
+            ax[i].set_xlabel(f"$t$")
 
-        if i==3:
+        if i==num_feats_show - 1:
             ax[i].legend()
     plt.suptitle(title)
     fig.show()
@@ -98,12 +117,12 @@ def subplot_trajectories(stats, label, line, title, domain_label, random_feats=F
 
 # Experiment settings
 num_trials = 5000
-num_running_steps = 10
+num_running_steps = 20
 
 ##############
 # Network settings
 ################
-# In this case instead of initializing from random varialbes, use GPT2 embeddings
+# In this case instead of initializing from random variables, use GPT2 embeddings
 # as initialization (They are distributed in a Gaussian way for a large number of tokens).
 
 # Load GPT2
@@ -112,22 +131,29 @@ model_name = "gpt2"
 model = GPT.from_pretrained(model_name, dict(dropout=0.0))
 model.to(device)
 
-beta = 1.0
-q_is_roll = False  # If W_q a shift over W_k
-patterns_from_vocab = False # If you draw samples from the token vocab to make the W patterns
-torch.manual_seed(1005)
-emb_size = 1000 # Number of tokens in the embedding. -1 if you want the full vocab size
-num_patterns = 768  # Number of patterns in the W matrices. -1 if you want to match token_size
+beta = 10
+q_is_roll = True  # If W_q a shift over W_k
+patterns_from_vocab = True # If you draw samples from the token vocab to make the W patterns
+emb_size = 10000 # Number of tokens in the embedding. -1 if you want the full vocab size
+num_patterns = 5  # Number of patterns in the W matrices. -1 if you want to match token_size
+token_size = 3  # Number of features. If -1, match with the embedding token size, otherwise, force your selection.
+random_ini_token = False
+ini_token_idx = 0
+seed = 150
+
+torch.manual_seed(seed)
 
 
+####################
 # Set up the weights
-
-
+####################
 
 # Get embeddings to sample tokens from them
 wte = model.transformer.wte
 num_embeddings = wte.num_embeddings
-token_size = wte.embedding_dim
+
+if token_size==-1:
+    token_size = wte.embedding_dim
 
 if emb_size == -1:
   emb_size = num_embeddings
@@ -136,32 +162,62 @@ if num_patterns == -1:
   num_patterns = token_size
 
 # Select emb_size tokens from the embedding to create a smaller vocabulary
-perm_idxs = torch.randperm(num_embeddings)
-perm_idxs = perm_idxs[:emb_size]
+perm_tokens_idxs = torch.randperm(num_embeddings)
+tokens_idxs = perm_tokens_idxs[:emb_size]
 
 # Transform into token representation
 # Equivalent to x_{t+1} in the LaTeX doc
-tok_emb = model.transformer.wte(perm_idxs).detach()
+tok_emb = model.transformer.wte(tokens_idxs).detach()
+perm_feats_idxs = torch.randperm(wte.embedding_dim)
+tok_emb = tok_emb[:, perm_feats_idxs[:token_size]]
 
 # Define the W patterns
 
 if patterns_from_vocab:
-  k_patts = torch.randperm(emb_size)[:num_patterns]
-  q_patts = torch.randperm(emb_size)[:num_patterns]
 
-  # W_k = tok_emb[k_patts] / token_size
-  # W_q = tok_emb[q_patts] / token_size
+    if num_patterns > emb_size:
+        raise Exception("num_patterns > emb_size")
 
-  W_k = tok_emb[k_patts] / math.sqrt(token_size)
-  W_q = tok_emb[q_patts] / math.sqrt(token_size)
+    k_patts = torch.randperm(emb_size)[:num_patterns]
+    q_patts = torch.randperm(emb_size)[:num_patterns]
+
+    # W_k = tok_emb[k_patts] / token_size
+    # W_q = tok_emb[q_patts] / token_size
+
+    tok_mean = torch.mean(tok_emb, dim=None)
+    tok_mean_b = torch.mean(tok_emb, dim=0)
+    k_mean = torch.mean(tok_emb[k_patts], dim=None)
+    q_mean = torch.mean(tok_emb[q_patts], dim=None)
+    k_std = torch.std(tok_emb[k_patts], dim=None)
+    q_std = torch.std(tok_emb[q_patts], dim=None)
+
+    tok_emb_std = torch.std(tok_emb, dim=None)
+    tok_emb_std_b = torch.std(tok_emb, dim=0)
+
+    scaling = torch.sqrt(tok_emb_std_b**2 + tok_mean_b**2)
+
+    # W_k = tok_emb[k_patts] / scaling
+    # W_q = tok_emb[q_patts] / scaling
+    #
+    # J = (1 / math.sqrt(token_size * num_patterns)) * (W_k.T @ W_q)
+
+    W_k = tok_emb[k_patts] / (scaling * (token_size * num_patterns)**(1/4))
+    W_q = tok_emb[q_patts] / (scaling * (token_size * num_patterns)**(1/4))
+
+    J = (W_k.T @ W_q)
+
+
+    J_var = torch.var(J, dim=None)
+    print(J_var, 1/token_size)
+    print()
 
 else:
-  # Create random W patterns
-  w_mean = 0
-  w_std = 1/math.sqrt(token_size)
-  # num_patterns = token_size
-  W_k = torch.normal(w_mean, w_std, (num_patterns, token_size))
-  W_q = torch.normal(w_mean, w_std, (num_patterns, token_size))
+    # Create random W patterns
+    w_mean = 0
+    w_std = 1/math.sqrt(token_size)
+    # num_patterns = token_size
+    W_k = torch.normal(w_mean, w_std, (num_patterns, token_size))
+    W_q = torch.normal(w_mean, w_std, (num_patterns, token_size))
 
 if q_is_roll:
     W_q = torch.roll(W_k, 1, 0)
@@ -170,10 +226,11 @@ if q_is_roll:
 
 # Choose initial token
 # Choose x_0
-idx_0 = 1
-tok_0 = tok_emb[idx_0]
-tok_0 = W_q[idx_0]
-
+if random_ini_token:
+    tok_0 = torch.randn((emb_size, token_size))[ini_token_idx]
+else:
+    # tok_0 = tok_emb[ini_token_idx]
+    tok_0 = W_q[ini_token_idx]
 
 
 ################################################
@@ -204,10 +261,30 @@ endt = time.time()
 time_elapsed = endt - startt
 print(f"Time elapsed: {time_elapsed:.2f} seconds")
 
-
+print("Selected tokens at each step")
 print(idxs[0])
+print(idxs[3])
+print(idxs[100])
+print(idxs[-1])
+
+
+
 tok_stats_avg = torch.mean(tok_stats, dim=0)
 
+
+# Plot average statistics of the original model
+
+tag = "x"
+if patterns_from_vocab:
+    patterns_str = "VocabPatts"
+else:
+    patterns_str = "GaussianPatts"
+
+stats = [tok_stats_avg]
+label = ["Ori"]
+line = ["-"]
+title = rf"{tag} $\beta$={beta} n_trials={num_trials} {patterns_str} N={token_size} M={num_patterns} V={emb_size}"
+subplot_trajectories(stats, label, line, title, "x", random_feats=True)
 
 
 #####
@@ -287,9 +364,21 @@ for t in plotting_steps:
 
 fig, ax = plt.subplots(2, 2)
 ax = ax.ravel()
-feats_to_show = [3,5,103,108]
+feats_perm = torch.randperm(num_patterns)
+feats_to_show = feats_perm[:4]
 for i in range(0, len(feats_to_show)):
     ax[i].hist((tok_emb @ W_k.T)[:, feats_to_show[i]])
+    ax[i].set_title(f"Feat {feats_to_show[i]}")
+fig.show()
+plt.close()
+
+
+fig, ax = plt.subplots(1, 3)
+ax = ax.ravel()
+feats_perm = torch.randperm(token_size)
+feats_to_show = feats_perm[:3]
+for i in range(0, len(feats_to_show)):
+    ax[i].hist((tok_emb)[:, feats_to_show[i]])
     ax[i].set_title(f"Feat {feats_to_show[i]}")
 fig.show()
 plt.close()
@@ -312,12 +401,20 @@ label = ["Ori", "MFx", "MFkLSQ", "MFx(FromStats)"]
 line = ["-", "-.", "--", ":"]
 subplot_trajectories(stats, label, line, title, "x", random_feats=True)
 
+# Plot random trajectories
+stats = [tok_stats_mf_mf[:10], tok_stats_mf_x_mf_lsq, tok_stats_mf_traj]
+label = ["MFx", "MFkLSQ", "MFx(FromStats)"]
+line = ["-.", "--", ":"]
+subplot_trajectories(stats, label, line, title, "x", random_feats=True)
 
 # Train PCA to plot low-dim trajectories
 
 pca_data = torch.cat((tok_stats_avg, tok_stats_mf_mf, tok_stats_mf_x_mf_lsq, tok_stats_mf_traj))
 
 U, S, V = torch.pca_lowrank(pca_data)
-num_dims = 4
+num_dims = min(token_size, 4)
+stats = [tok_stats_avg, tok_stats_mf_mf, tok_stats_mf_x_mf_lsq, tok_stats_mf_traj]
+label = ["Ori", "MFx", "MFkLSQ", "MFx(FromStats)"]
+line = ["-", "-.", "--", ":"]
 low_dim_stats = [stat @ V[:, :num_dims] for stat in stats]
 subplot_trajectories(low_dim_stats, label, line, title, "\lambda", random_feats=False)
