@@ -299,7 +299,7 @@ tok_stats_avg = torch.mean(tok_stats, dim=0)
 
 # Plot average statistics of the original model
 
-tag = "x"
+tag = "k"
 if patterns_from_vocab:
     patterns_str = "VocabPatts"
 else:
@@ -416,7 +416,7 @@ plt.close()
 # Plot error trajectories for different methods
 other_stats = [stats_x_mf @ W_k.T, stats_k_mf, stats_x_sim @ W_k.T, stats_k_sim]
 
-tag = "x"
+tag = "k"
 if patterns_from_vocab:
     patterns_str = "VocabPatts"
 else:
